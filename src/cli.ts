@@ -176,7 +176,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  if (typeof err === 'object' && err !== null && Symbol.iterator in Object(err)) {
+  if (err === Symbol.for('clack:cancel')) {
     process.exit(0);
   }
   console.error(pc.red('\nUnexpected error:'), err);
