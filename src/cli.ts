@@ -295,7 +295,9 @@ async function main(): Promise<void> {
   // Persist choices for next run
   savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id });
 
-  const disableExperimentalBetas = !selection.model.isAnthropicNative;
+  // Always disable experimental betas — OpenCode Zen/Go is a proxy and may not
+  // support all Anthropic-specific beta headers even for Anthropic-native models.
+  const disableExperimentalBetas = true;
 
   if (dryRun) {
     printDryRun(
@@ -310,9 +312,7 @@ async function main(): Promise<void> {
   }
 
   const childEnv = buildChildEnv(selection.backend, selection.model.id, apiKey);
-  if (disableExperimentalBetas) {
-    childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
-  }
+  childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   const exitCode = await launchClaude(childEnv, selection.model.id, claudeArgs);
   process.exit(exitCode);
 }
