@@ -219,13 +219,16 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
   } else if (saveChoice === 'keychain') {
     if (saveToKeychain(trimmedKey)) {
       try {
-        appendFileSync(
-          path,
-          `\n# opencode-starter: load API key from macOS Keychain\n` +
-          `export OPENCODE_API_KEY="$(security find-generic-password -s opencode-starter -a opencode-starter -w 2>/dev/null)"\n`,
-        );
-        p.log.success(`Key saved to Keychain + auto-load added to ${display}`);
-        p.log.info(`Open a new terminal (or run \`source ${display}\`) to activate`);
+        const autoLoadLine = `export OPENCODE_API_KEY="$(security find-generic-password -s opencode-starter -a opencode-starter -w 2>/dev/null)"`;
+        const existing = readFileSync(path, 'utf8');
+        if (!existing.includes(autoLoadLine)) {
+          appendFileSync(path, `\n# opencode-starter: load API key from macOS Keychain\n${autoLoadLine}\n`);
+          p.log.success(`Key saved to Keychain + auto-load added to ${display}`);
+          p.log.info(`Open a new terminal (or run \`source ${display}\`) to activate`);
+        } else {
+          p.log.success('Key saved to Keychain');
+          p.log.info(`Auto-load line already exists in ${display}`);
+        }
       } catch {
         p.log.success('Key saved to Keychain');
         p.log.warn(`Could not write auto-load line to ${display} — run \`source ${display}\` manually`);
