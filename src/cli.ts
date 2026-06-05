@@ -449,7 +449,7 @@ async function main(): Promise<void> {
   let proxyHandle: ProxyHandle | null = null;
   if (selection.model.modelFormat === 'openai') {
     try {
-      proxyHandle = await startProxy(selection.backend.baseUrl);
+      proxyHandle = await startProxy(selection.backend.baseUrl, selection.model.id);
       p.log.info(
         `Translation proxy started on port ${proxyHandle.port} ` +
         pc.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`),

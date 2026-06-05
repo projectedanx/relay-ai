@@ -632,9 +632,20 @@ function anthropicError(res, status, message) {
     error: { type: "api_error", message }
   });
 }
-function startProxy(upstreamBaseUrl) {
+function startProxy(upstreamBaseUrl, modelId) {
   const upstreamUrl = `${upstreamBaseUrl}/v1/chat/completions`;
+  const modelsResponse = JSON.stringify({
+    data: [{ id: modelId, type: "model", display_name: modelId, created_at: "2025-01-01T00:00:00Z" }],
+    has_more: false,
+    first_id: modelId,
+    last_id: modelId
+  });
   const server = createServer(async (req, res) => {
+    if (req.method === "GET" && req.url?.startsWith("/v1/models")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(modelsResponse);
+      return;
+    }
     if (req.method === "POST" && req.url === "/v1/messages") {
       const apiKey = extractApiKey(req);
       if (!apiKey) {
@@ -1273,7 +1284,7 @@ async function main() {
   let proxyHandle = null;
   if (selection.model.modelFormat === "openai") {
     try {
-      proxyHandle = await startProxy(selection.backend.baseUrl);
+      proxyHandle = await startProxy(selection.backend.baseUrl, selection.model.id);
       p2.log.info(
         `Translation proxy started on port ${proxyHandle.port} ` + pc2.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
       );

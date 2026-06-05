@@ -452,10 +452,25 @@ export interface ProxyHandle {
   close: () => void;
 }
 
-export function startProxy(upstreamBaseUrl: string): Promise<ProxyHandle> {
+export function startProxy(upstreamBaseUrl: string, modelId: string): Promise<ProxyHandle> {
   const upstreamUrl = `${upstreamBaseUrl}/v1/chat/completions`;
 
+  // Synthetic Anthropic-format models response so Claude Code can validate the model.
+  const modelsResponse = JSON.stringify({
+    data: [{ id: modelId, type: 'model', display_name: modelId, created_at: '2025-01-01T00:00:00Z' }],
+    has_more: false,
+    first_id: modelId,
+    last_id: modelId,
+  });
+
   const server = createServer(async (req, res) => {
+    // GET /v1/models — Claude Code validates the model on startup
+    if (req.method === 'GET' && req.url?.startsWith('/v1/models')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(modelsResponse);
+      return;
+    }
+
     // POST /v1/messages — the main translation path
     if (req.method === 'POST' && req.url === '/v1/messages') {
       const apiKey = extractApiKey(req);
