@@ -7,12 +7,13 @@ export const BACKENDS: Record<'zen' | 'go', BackendConfig> = {
   zen: {
     id: 'zen',
     name: 'OpenCode Zen',
-    baseUrl: 'https://opencode.ai/zen/v1',
+    // No /v1 suffix — the Anthropic SDK appends /v1/messages automatically
+    baseUrl: 'https://opencode.ai/zen',
   },
   go: {
     id: 'go',
     name: 'OpenCode Go',
-    baseUrl: 'https://opencode.ai/zen/go/v1',
+    baseUrl: 'https://opencode.ai/zen/go',
   },
 };
 
