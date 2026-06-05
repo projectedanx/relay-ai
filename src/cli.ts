@@ -154,7 +154,9 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
     if (existing) return existing;
   }
 
-  const isMac = process.platform === 'darwin';
+  const isMac     = process.platform === 'darwin';
+  const isWindows = process.platform === 'win32';
+  const isLinux   = process.platform === 'linux';
 
   if (simulate) {
     p.note(
@@ -163,23 +165,14 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
     );
   }
 
-  // Step 2: on macOS, offer to check Keychain before asking for a paste (skipped in simulate mode)
-  if (isMac && !simulate) {
-    const checkKeychain = await p.confirm({
-      message: 'OPENCODE_API_KEY not found. Check macOS Keychain for a stored key?',
-      initialValue: true,
-    });
-
-    if (p.isCancel(checkKeychain)) { p.cancel('Cancelled.'); return null; }
-
-    if (checkKeychain) {
-      const keychainKey = readFromKeychain();
-      if (keychainKey) {
-        p.log.success('Found key in macOS Keychain');
-        process.env['OPENCODE_API_KEY'] = keychainKey;
-        return keychainKey;
-      }
-      p.log.info('No key found in Keychain — let\'s set one up');
+  // Step 2: silently check the OS credential store (skipped in dry-run/simulate mode)
+  if (!simulate) {
+    const storedKey = await readFromCredentialStore();
+    if (storedKey) {
+      const storeName = isMac ? 'macOS Keychain' : isWindows ? 'Windows Credential Manager' : 'Secret Service';
+      p.log.success(`Found key in ${storeName}`);
+      process.env['OPENCODE_API_KEY'] = storedKey;
+      return storedKey;
     }
   }
 
@@ -194,38 +187,90 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
   if (p.isCancel(key)) { p.cancel('Cancelled.'); return null; }
 
   const trimmedKey = (key as string).trim();
+  let secretServiceAvailable = false;
+  if (isLinux && !simulate) {
+    secretServiceAvailable = await isSecretServiceAvailable();
+  }
+
   const { display, path } = detectShellProfile();
 
   // Step 4: where to save it
-  type SaveChoice = 'keychain' | 'profile' | 'session';
+  type SaveChoice = 'keychain' | 'keychain-autoload' | 'profile' | 'session' | 'credential-manager' | 'setx' | 'secret-service';
 
-  const saveOptions: Array<{ value: SaveChoice; label: string; hint: string }> = isMac
-    ? [
+  const saveOptions: Array<{ value: SaveChoice; label: string; hint: string }> = (() => {
+    if (isMac) {
+      return [
         {
-          value: 'keychain',
-          label: `Keychain + ${display} auto-load`,
-          hint: 'Key stored encrypted in Keychain; shell reads it at startup via ~/.zshrc',
+          value: 'keychain' as SaveChoice,
+          label: 'Keychain only',
+          hint: 'Key stored encrypted in Keychain; opencode-starter reads it automatically next time',
         },
         {
-          value: 'profile',
+          value: 'keychain-autoload' as SaveChoice,
+          label: `Keychain + ${display} auto-load`,
+          hint: `Key in Keychain; ${display} also exports it so all terminal tools can see it`,
+        },
+        {
+          value: 'profile' as SaveChoice,
           label: `${display} only (plaintext)`,
           hint: 'Key written directly to your shell profile — simpler but less secure',
         },
         {
-          value: 'session',
+          value: 'session' as SaveChoice,
           label: 'This session only',
           hint: "Not saved anywhere — you'll be asked again next time",
         },
-      ]
-    : [
-        { value: 'profile',  label: display,             hint: 'Saved to your shell profile' },
-        { value: 'session',  label: 'This session only', hint: "Not saved — you'll be asked again next time" },
       ];
+    }
+    if (isWindows) {
+      return [
+        {
+          value: 'credential-manager' as SaveChoice,
+          label: 'Windows Credential Manager',
+          hint: 'Key stored securely; opencode-starter reads it automatically next time',
+        },
+        {
+          value: 'setx' as SaveChoice,
+          label: 'Persistent environment variable (plaintext)',
+          hint: 'Runs setx — key visible in System Properties → Environment Variables',
+        },
+        {
+          value: 'session' as SaveChoice,
+          label: 'This session only',
+          hint: "Not saved anywhere — you'll be asked again next time",
+        },
+      ];
+    }
+    // Linux
+    const opts: Array<{ value: SaveChoice; label: string; hint: string }> = [];
+    if (secretServiceAvailable) {
+      opts.push({
+        value: 'secret-service' as SaveChoice,
+        label: 'Secret Service (GNOME Keyring / KWallet)',
+        hint: 'Key stored securely in your desktop keyring; opencode-starter reads it automatically next time',
+      });
+    } else if (!simulate) {
+      p.log.info('No keyring daemon detected — secure storage requires GNOME Keyring or KWallet running.');
+    }
+    opts.push(
+      {
+        value: 'profile' as SaveChoice,
+        label: `${display} (plaintext)`,
+        hint: 'Key written directly to your shell profile',
+      },
+      {
+        value: 'session' as SaveChoice,
+        label: 'This session only',
+        hint: "Not saved anywhere — you'll be asked again next time",
+      },
+    );
+    return opts;
+  })();
 
   const saveChoice = await p.select<SaveChoice>({
     message: 'Where should we save the key?',
     options: saveOptions,
-    initialValue: isMac ? 'keychain' : 'profile',
+    initialValue: (isMac ? 'keychain' : isWindows ? 'credential-manager' : secretServiceAvailable ? 'secret-service' : 'profile') as SaveChoice,
   });
 
   if (p.isCancel(saveChoice)) { p.cancel('Cancelled.'); return null; }
