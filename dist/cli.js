@@ -110,7 +110,7 @@ function classifyModelFormat(modelId, providerNpm) {
   if (lower.startsWith("gemini-")) return "unsupported";
   return "openai";
 }
-var VERSION = "0.2.0";
+var VERSION = "0.2.1";
 
 // src/env.ts
 function detectConflicts() {
@@ -245,14 +245,6 @@ async function getModels(backend, fallbackModels) {
 import { createServer } from "http";
 import { Readable } from "stream";
 import { appendFileSync } from "fs";
-var PROXY_LOG = "/tmp/opencode-proxy-debug.log";
-function plog(msg) {
-  try {
-    appendFileSync(PROXY_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
-`);
-  } catch {
-  }
-}
 function hashSystemPrompt(system) {
   if (!system) return null;
   const text = typeof system === "string" ? system : system.map((s) => s.text || "").join("\n");
@@ -641,8 +633,17 @@ function anthropicError(res, status, message) {
     error: { type: "api_error", message }
   });
 }
-function startProxy(upstreamBaseUrl, modelId) {
+function startProxy(upstreamBaseUrl, modelId, debug = false) {
   const upstreamUrl = `${upstreamBaseUrl}/v1/chat/completions`;
+  const LOG = "/tmp/opencode-proxy-debug.log";
+  const plog = debug ? (msg) => {
+    try {
+      appendFileSync(LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
+`);
+    } catch {
+    }
+  } : (_msg) => {
+  };
   const modelsResponse = JSON.stringify({
     data: [{ id: modelId, type: "model", display_name: modelId, created_at: "2025-01-01T00:00:00Z" }],
     has_more: false,
@@ -1304,7 +1305,7 @@ async function main() {
   let proxyHandle = null;
   if (selection.model.modelFormat === "openai") {
     try {
-      proxyHandle = await startProxy(selection.backend.baseUrl, selection.model.id);
+      proxyHandle = await startProxy(selection.backend.baseUrl, selection.model.id, trace);
       p2.log.info(
         `Translation proxy started on port ${proxyHandle.port} ` + pc2.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
       );

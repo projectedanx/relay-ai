@@ -5,11 +5,6 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { appendFileSync } from 'node:fs';
 
-const PROXY_LOG = '/tmp/opencode-proxy-debug.log';
-function plog(msg: string) {
-  try { appendFileSync(PROXY_LOG, `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ }
-}
-
 // ── Cache / hash utilities ──────────────────────────────────────────
 
 function hashSystemPrompt(system: string | any[] | undefined): string | null {
@@ -458,8 +453,12 @@ export interface ProxyHandle {
   close: () => void;
 }
 
-export function startProxy(upstreamBaseUrl: string, modelId: string): Promise<ProxyHandle> {
+export function startProxy(upstreamBaseUrl: string, modelId: string, debug = false): Promise<ProxyHandle> {
   const upstreamUrl = `${upstreamBaseUrl}/v1/chat/completions`;
+  const LOG = '/tmp/opencode-proxy-debug.log';
+  const plog = debug
+    ? (msg: string) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ } }
+    : (_msg: string) => {};
 
   // Synthetic Anthropic-format models response so Claude Code can validate the model.
   const modelsResponse = JSON.stringify({
