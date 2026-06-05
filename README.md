@@ -33,7 +33,11 @@ opencode-starter is an interactive CLI wizard that configures and launches AI co
 ## Installation
 
 ```bash
+# Install globally
 npm install -g opencode-starter
+
+# Upgrade to the latest version
+npm update -g opencode-starter
 ```
 
 ## Setup
