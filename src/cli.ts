@@ -103,11 +103,18 @@ function printDryRun(
 
 function detectShellProfile(): { display: string; path: string } {
   const shell = process.env['SHELL'] ?? '';
-  if (shell.includes('zsh')) return { display: '~/.zshrc', path: `${homedir()}/.zshrc` };
-  if (shell.includes('bash')) {
-    const profile = process.platform === 'darwin' ? '.bash_profile' : '.bashrc';
-    return { display: `~/${profile}`, path: `${homedir()}/${profile}` };
+  if (process.platform === 'darwin') {
+    if (shell.includes('zsh'))  return { display: '~/.zshrc',       path: `${homedir()}/.zshrc` };
+    if (shell.includes('bash')) return { display: '~/.bash_profile', path: `${homedir()}/.bash_profile` };
+    return { display: '~/.profile', path: `${homedir()}/.profile` };
   }
+  if (process.platform === 'linux') {
+    if (shell.includes('zsh'))  return { display: '~/.zshrc',   path: `${homedir()}/.zshrc` };
+    if (shell.includes('bash')) return { display: '~/.bashrc',  path: `${homedir()}/.bashrc` };
+    return { display: '~/.profile', path: `${homedir()}/.profile` };
+  }
+  // Windows — not used for save options (setx is used instead) but available for display
+  if (shell.includes('bash')) return { display: '~/.bashrc', path: `${homedir()}/.bashrc` };
   return { display: '~/.profile', path: `${homedir()}/.profile` };
 }
 
