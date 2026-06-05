@@ -19,12 +19,15 @@ export function buildChildEnv(
   backend: BackendConfig,
   model: string,
   apiKey: string,
+  proxyPort?: number,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
     delete env[name];
   }
-  env['ANTHROPIC_BASE_URL'] = backend.baseUrl;
+  env['ANTHROPIC_BASE_URL'] = proxyPort
+    ? `http://127.0.0.1:${proxyPort}`
+    : backend.baseUrl;
   env['ANTHROPIC_API_KEY'] = apiKey;
   env['ANTHROPIC_MODEL'] = model;
   return env;

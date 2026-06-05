@@ -5,6 +5,7 @@ import {
   mergeModels,
   groupModels,
 } from '../src/models.js';
+import { classifyModelFormat } from '../src/constants.js';
 import type { ModelInfo } from '../src/types.js';
 
 describe('deriveBrand', () => {
@@ -35,8 +36,48 @@ describe('deriveBrand', () => {
   });
 });
 
+describe('classifyModelFormat', () => {
+  // Provider npm takes precedence
+  it('returns anthropic for @ai-sdk/anthropic provider', () => {
+    expect(classifyModelFormat('claude-sonnet-4-6', '@ai-sdk/anthropic')).toBe('anthropic');
+  });
+
+  it('returns unsupported for @ai-sdk/openai provider', () => {
+    expect(classifyModelFormat('gpt-5.4', '@ai-sdk/openai')).toBe('unsupported');
+  });
+
+  it('returns unsupported for @ai-sdk/google provider', () => {
+    expect(classifyModelFormat('gemini-3-flash', '@ai-sdk/google')).toBe('unsupported');
+  });
+
+  it('returns openai for models without provider npm', () => {
+    expect(classifyModelFormat('deepseek-v4-flash', undefined)).toBe('openai');
+  });
+
+  // ID-prefix fallback when no provider npm
+  it('returns anthropic for claude-* without cache', () => {
+    expect(classifyModelFormat('claude-opus-4-8', undefined)).toBe('anthropic');
+  });
+
+  it('returns unsupported for gpt-* without cache', () => {
+    expect(classifyModelFormat('gpt-5.5', undefined)).toBe('unsupported');
+  });
+
+  it('returns unsupported for gemini-* without cache', () => {
+    expect(classifyModelFormat('gemini-3.1-pro', undefined)).toBe('unsupported');
+  });
+
+  it('returns openai for unknown models (default)', () => {
+    expect(classifyModelFormat('big-pickle', undefined)).toBe('openai');
+  });
+
+  it('returns openai for kimi without cache', () => {
+    expect(classifyModelFormat('kimi-k2.6', undefined)).toBe('openai');
+  });
+});
+
 describe('mergeModels', () => {
-  it('returns minimal ModelInfo when cache is null', () => {
+  it('returns ModelInfo with format classification when cache is null', () => {
     const result = mergeModels(['claude-opus-4-8'], null, 'zen');
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({
@@ -44,9 +85,14 @@ describe('mergeModels', () => {
       name: 'claude-opus-4-8',
       isFree: false,
       brand: 'Other',
-      isAnthropicNative: false,
+      modelFormat: 'anthropic',
       sourceBackend: 'zen',
     });
+  });
+
+  it('classifies uncached non-claude models as openai', () => {
+    const result = mergeModels(['deepseek-v4-flash'], null, 'zen');
+    expect(result[0]).toMatchObject({ modelFormat: 'openai' });
   });
 
   it('uses backendId for sourceBackend when no cache entry', () => {
@@ -55,14 +101,14 @@ describe('mergeModels', () => {
   });
 
   it('enriches models with cache data when available', () => {
-    const cache = new Map([
+    const cache = new Map<string, ModelInfo>([
       ['claude-sonnet-4-6', {
         id: 'claude-sonnet-4-6',
         name: 'Claude Sonnet 4.6',
         isFree: false,
         brand: 'Claude',
-        isAnthropicNative: true,
         sourceBackend: 'zen' as const,
+        modelFormat: 'anthropic' as const,
         cost: { input: 3, output: 15 },
       }],
     ]);
@@ -70,36 +116,44 @@ describe('mergeModels', () => {
     expect(result[0]).toMatchObject({
       id: 'claude-sonnet-4-6',
       name: 'Claude Sonnet 4.6',
-      isFree: false,
-      isAnthropicNative: true,
+      modelFormat: 'anthropic',
       brand: 'Claude',
       sourceBackend: 'zen',
     });
   });
 
-  it('marks non-Anthropic models as not native', () => {
-    const cache = new Map([
+  it('marks non-Anthropic models correctly from cache', () => {
+    const cache = new Map<string, ModelInfo>([
       ['deepseek-v4-flash-free', {
         id: 'deepseek-v4-flash-free',
         name: 'DeepSeek V4 Flash Free',
         isFree: true,
         brand: 'DeepSeek',
-        isAnthropicNative: false,
         sourceBackend: 'zen' as const,
+        modelFormat: 'openai' as const,
         cost: { input: 0, output: 0 },
       }],
     ]);
     const result = mergeModels(['deepseek-v4-flash-free'], cache, 'zen');
     expect(result[0]).toMatchObject({
       isFree: true,
-      isAnthropicNative: false,
+      modelFormat: 'openai',
       sourceBackend: 'zen',
     });
   });
 
+  it('filters out stale free models', () => {
+    const result = mergeModels(['qwen3.6-plus-free', 'big-pickle'], null, 'zen');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.id).toBe('big-pickle');
+  });
+
   it('skips cache entries for models not in API list', () => {
-    const cache = new Map([
-      ['model-in-cache', { id: 'model-in-cache', name: 'X', isFree: false, brand: 'Other', isAnthropicNative: false, sourceBackend: 'zen' as const }],
+    const cache = new Map<string, ModelInfo>([
+      ['model-in-cache', {
+        id: 'model-in-cache', name: 'X', isFree: false, brand: 'Other',
+        sourceBackend: 'zen' as const, modelFormat: 'openai' as const,
+      }],
     ]);
     const result = mergeModels(['model-from-api'], cache, 'zen');
     expect(result).toHaveLength(1);
@@ -108,19 +162,17 @@ describe('mergeModels', () => {
 });
 
 describe('groupModels', () => {
-  const makeModel = (id: string, isFree: boolean, brand: string, isAnthropicNative = false, sourceBackend: 'zen' | 'go' = 'zen'): ModelInfo => ({
-    id,
-    name: id,
-    isFree,
-    brand,
-    isAnthropicNative,
-    sourceBackend,
+  const makeModel = (
+    id: string, isFree: boolean, brand: string,
+    modelFormat: ModelInfo['modelFormat'] = 'openai', sourceBackend: 'zen' | 'go' = 'zen',
+  ): ModelInfo => ({
+    id, name: id, isFree, brand, sourceBackend, modelFormat,
   });
 
   it('separates free models from paid models', () => {
     const models = [
-      makeModel('claude-sonnet', false, 'Claude', true),
-      makeModel('deepseek-free', true, 'DeepSeek', false),
+      makeModel('claude-sonnet', false, 'Claude', 'anthropic'),
+      makeModel('deepseek-free', true, 'DeepSeek', 'openai'),
     ];
     const { free, byBrand } = groupModels(models);
     expect(free).toHaveLength(1);
@@ -141,8 +193,8 @@ describe('groupModels', () => {
 
   it('sorts paid models alphabetically by id within each brand', () => {
     const models = [
-      makeModel('claude-z', false, 'Claude', true),
-      makeModel('claude-a', false, 'Claude', true),
+      makeModel('claude-z', false, 'Claude', 'anthropic'),
+      makeModel('claude-a', false, 'Claude', 'anthropic'),
     ];
     const { byBrand } = groupModels(models);
     const claudeModels = byBrand.get('Claude')!;
@@ -150,7 +202,7 @@ describe('groupModels', () => {
   });
 
   it('returns empty free array and empty map when all models are paid', () => {
-    const models = [makeModel('claude-opus', false, 'Claude', true)];
+    const models = [makeModel('claude-opus', false, 'Claude', 'anthropic')];
     const { free, byBrand } = groupModels(models);
     expect(free).toHaveLength(0);
     expect(byBrand.size).toBe(1);

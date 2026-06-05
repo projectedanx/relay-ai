@@ -96,38 +96,20 @@ var CONFLICTING_ENV_VARS = [
 ];
 var OPENCODE_CACHE_PATH = join2(homedir2(), ".cache", "opencode", "models.json");
 var MODELS_CACHE_TTL_MS = 60 * 60 * 1e3;
-var BLOCKED_MODELS = /* @__PURE__ */ new Set([
-  // Zen free
-  "qwen3.6-plus-free",
+var STALE_FREE_MODELS = /* @__PURE__ */ new Set([
+  "qwen3.6-plus-free"
   // 401 — free promotion ended
-  "deepseek-v4-flash-free",
-  // 400 — DeepSeek rejects Anthropic message format
-  "mimo-v2.5-free",
-  // 400 — rejects Anthropic message format
-  "nemotron-3-super-free",
-  // 400 — rejects Anthropic message format
-  "nemotron-3-ultra-free",
-  // 400 — rejects Anthropic message format
-  // Go
-  "kimi-k2.6",
-  // 400 — rejects Anthropic message format
-  "kimi-k2.5",
-  // 400 — rejects Anthropic message format
-  "deepseek-v4-pro",
-  // 400 — DeepSeek rejects Anthropic message format
-  "deepseek-v4-flash",
-  // 400 — DeepSeek rejects Anthropic message format
-  "mimo-v2-pro",
-  // 400 — rejects Anthropic message format
-  "mimo-v2-omni",
-  // 400 — rejects Anthropic message format
-  "mimo-v2.5-pro",
-  // 400 — rejects Anthropic message format
-  "mimo-v2.5",
-  // 400 — rejects Anthropic message format
-  "hy3-preview"
-  // 400 — rejects Anthropic message format
 ]);
+function classifyModelFormat(modelId, providerNpm) {
+  if (providerNpm === "@ai-sdk/anthropic") return "anthropic";
+  if (providerNpm === "@ai-sdk/openai") return "unsupported";
+  if (providerNpm === "@ai-sdk/google") return "unsupported";
+  const lower = modelId.toLowerCase();
+  if (lower.startsWith("claude-")) return "anthropic";
+  if (lower.startsWith("gpt-")) return "unsupported";
+  if (lower.startsWith("gemini-")) return "unsupported";
+  return "openai";
+}
 var VERSION = "0.1.0";
 
 // src/env.ts
@@ -138,12 +120,12 @@ function resolveApiKey() {
   const key = process.env["OPENCODE_API_KEY"];
   return key?.trim() || null;
 }
-function buildChildEnv(backend, model, apiKey) {
+function buildChildEnv(backend, model, apiKey, proxyPort) {
   const env = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
     delete env[name];
   }
-  env["ANTHROPIC_BASE_URL"] = backend.baseUrl;
+  env["ANTHROPIC_BASE_URL"] = proxyPort ? `http://127.0.0.1:${proxyPort}` : backend.baseUrl;
   env["ANTHROPIC_API_KEY"] = apiKey;
   env["ANTHROPIC_MODEL"] = model;
   return env;
@@ -182,14 +164,14 @@ function readModelsFromCache(backendId) {
     for (const entry of Object.values(providerData.models)) {
       if (entry.status === "deprecated") continue;
       const isFree = entry.cost !== void 0 && entry.cost.input === 0 && entry.cost.output === 0;
-      const isAnthropicNative = entry.provider?.npm === "@ai-sdk/anthropic";
+      const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
       result.set(entry.id, {
         id: entry.id,
         name: entry.name ?? entry.id,
         isFree,
         brand: deriveBrand(entry.family ?? ""),
-        isAnthropicNative,
         sourceBackend: backendId,
+        modelFormat,
         cost: entry.cost
       });
     }
@@ -202,7 +184,7 @@ async function fetchModelsFromApi(backend) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5e3);
   try {
-    const res = await fetch(`${backend.baseUrl}/models`, {
+    const res = await fetch(`${backend.baseUrl}/v1/models`, {
       signal: controller.signal,
       headers: { Authorization: "Bearer test" }
     });
@@ -214,15 +196,17 @@ async function fetchModelsFromApi(backend) {
   }
 }
 function mergeModels(apiIds, cache, backendId) {
-  return apiIds.filter((id) => !BLOCKED_MODELS.has(id)).map((id) => {
+  return apiIds.filter((id) => !STALE_FREE_MODELS.has(id)).map((id) => {
     const cached = cache?.get(id);
-    return cached ?? {
+    if (cached) return { ...cached, sourceBackend: backendId };
+    const modelFormat = classifyModelFormat(id, void 0);
+    return {
       id,
       name: id,
       isFree: false,
       brand: "Other",
-      isAnthropicNative: false,
-      sourceBackend: backendId
+      sourceBackend: backendId,
+      modelFormat
     };
   });
 }
@@ -255,6 +239,470 @@ async function getModels(backend, fallbackModels) {
       "Cannot fetch models. Check your network and https://opencode.ai status."
     );
   }
+}
+
+// src/proxy.ts
+import { createServer } from "http";
+import { Readable } from "stream";
+function hashSystemPrompt(system) {
+  if (!system) return null;
+  const text = typeof system === "string" ? system : system.map((s) => s.text || "").join("\n");
+  if (!text.trim()) return null;
+  let hash = 5381;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash << 5) + hash + text.charCodeAt(i);
+    hash = hash & hash;
+  }
+  return "cache-" + Math.abs(hash).toString(36);
+}
+function tokenCount(...values) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+function extractCachedTokens(usage) {
+  return tokenCount(
+    usage?.prompt_tokens_details?.cached_tokens,
+    usage?.input_tokens_details?.cached_tokens,
+    usage?.cache_read_input_tokens
+  );
+}
+function extractInputTokens(usage) {
+  return tokenCount(
+    usage?.prompt_tokens,
+    usage?.input_tokens,
+    usage?.promptTokens,
+    usage?.inputTokens
+  );
+}
+function extractUncachedInputTokens(usage) {
+  return Math.max(0, extractInputTokens(usage) - extractCachedTokens(usage));
+}
+function extractOutputTokens(usage) {
+  return tokenCount(
+    usage?.completion_tokens,
+    usage?.output_tokens,
+    usage?.completionTokens,
+    usage?.outputTokens
+  );
+}
+function translateImageBlock(part) {
+  const src = part.source;
+  if (!src) return null;
+  if (src.type === "url") {
+    return { type: "image_url", image_url: { url: src.url } };
+  }
+  if (src.type === "base64") {
+    return { type: "image_url", image_url: { url: `data:${src.media_type};base64,${src.data}` } };
+  }
+  return null;
+}
+function translateRequest(body) {
+  const { model, messages, system, temperature, max_tokens, top_p, stop_sequences, tools, stream } = body;
+  const openAIMessages = Array.isArray(messages) ? messages.flatMap((msg) => {
+    if (typeof msg.content === "string") {
+      return [{ role: msg.role, content: msg.content }];
+    }
+    if (!Array.isArray(msg.content)) return [];
+    const result = [];
+    if (msg.role === "assistant") {
+      const assistantMsg = { role: "assistant", content: null };
+      let text = "";
+      let reasoningContent = "";
+      const toolCalls = [];
+      for (const part of msg.content) {
+        if (part.type === "text") {
+          text += (typeof part.text === "string" ? part.text : JSON.stringify(part.text)) + "\n";
+        } else if (part.type === "thinking") {
+          reasoningContent += (typeof part.thinking === "string" ? part.thinking : JSON.stringify(part.thinking)) + "\n";
+        } else if (part.type === "tool_use") {
+          toolCalls.push({
+            id: part.id,
+            type: "function",
+            function: { name: part.name, arguments: JSON.stringify(part.input) }
+          });
+        }
+      }
+      const trimmed = text.trim();
+      const trimmedReasoning = reasoningContent.trim();
+      if (trimmed) assistantMsg.content = trimmed;
+      if (trimmedReasoning) assistantMsg.reasoning_content = trimmedReasoning;
+      if (toolCalls.length > 0) assistantMsg.tool_calls = toolCalls;
+      if (assistantMsg.content || assistantMsg.reasoning_content || assistantMsg.tool_calls) result.push(assistantMsg);
+    }
+    if (msg.role === "user") {
+      let userText = "";
+      const contentParts = [];
+      const toolResults = [];
+      for (const part of msg.content) {
+        if (part.type === "text") {
+          userText += (typeof part.text === "string" ? part.text : JSON.stringify(part.text)) + "\n";
+        } else if (part.type === "image") {
+          const translated = translateImageBlock(part);
+          if (translated) contentParts.push(translated);
+        } else if (part.type === "tool_result") {
+          toolResults.push({
+            role: "tool",
+            tool_call_id: part.tool_use_id,
+            content: typeof part.content === "string" ? part.content : JSON.stringify(part.content)
+          });
+        }
+      }
+      const trimmed = userText.trim();
+      result.push(...toolResults);
+      if (contentParts.length > 0) {
+        if (trimmed) contentParts.unshift({ type: "text", text: trimmed });
+        result.push({ role: "user", content: contentParts });
+      } else if (trimmed) {
+        result.push({ role: "user", content: trimmed });
+      }
+    }
+    return result;
+  }) : [];
+  const systemMessages = Array.isArray(system) ? system.map((item) => ({ role: "system", content: item.text })) : system ? [{ role: "system", content: system }] : [];
+  const data = { model, messages: [...systemMessages, ...openAIMessages] };
+  if (max_tokens !== void 0) data.max_tokens = max_tokens;
+  if (temperature !== void 0) data.temperature = temperature;
+  if (top_p !== void 0) data.top_p = top_p;
+  if (stream !== void 0) data.stream = stream;
+  if (stream) data.stream_options = { include_usage: true };
+  if (stop_sequences) data.stop = stop_sequences;
+  if (tools) {
+    data.tools = tools.map((item) => ({
+      type: "function",
+      function: {
+        name: item.name,
+        description: item.description,
+        parameters: item.input_schema
+      }
+    }));
+  }
+  const cacheKey = hashSystemPrompt(system);
+  if (cacheKey) data.prompt_cache_key = cacheKey;
+  return data;
+}
+function parseToolArguments(value) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function translateResponse(completion, model) {
+  const messageId = "msg_" + Date.now();
+  const content = [];
+  const message = completion.choices?.[0]?.message;
+  if (message?.reasoning_content) {
+    content.push({ type: "thinking", thinking: message.reasoning_content, signature: "" });
+  }
+  if (message?.content) {
+    content.push({ text: message.content, type: "text" });
+  }
+  if (message?.tool_calls) {
+    content.push(...message.tool_calls.map((item) => ({
+      type: "tool_use",
+      id: item.id,
+      name: item.function?.name,
+      input: parseToolArguments(item.function?.arguments)
+    })));
+  }
+  const finishReason = completion.choices?.[0]?.finish_reason;
+  let stopReason = "end_turn";
+  if (finishReason === "tool_calls") stopReason = "tool_use";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  const result = {
+    id: messageId,
+    type: "message",
+    role: "assistant",
+    content,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    model
+  };
+  if (completion.usage) {
+    result.usage = {
+      input_tokens: extractUncachedInputTokens(completion.usage),
+      output_tokens: extractOutputTokens(completion.usage),
+      cache_read_input_tokens: extractCachedTokens(completion.usage),
+      cache_creation_input_tokens: 0
+    };
+  }
+  return result;
+}
+function sseChunk(eventType, data) {
+  return `event: ${eventType}
+data: ${JSON.stringify(data)}
+
+`;
+}
+function translateStream(upstreamBody, model) {
+  const messageId = "msg_" + Date.now();
+  let contentBlockIndex = -1;
+  let hasStartedTextBlock = false;
+  let hasStartedThinkingBlock = false;
+  let isToolUse = false;
+  let currentToolCallId = null;
+  let lastUsage = null;
+  let finishReason = null;
+  let messageStarted = false;
+  let buffer = "";
+  const output = new Readable({ read() {
+  } });
+  function emitSSE(eventType, data) {
+    output.push(sseChunk(eventType, data));
+  }
+  function emitMessageStart() {
+    if (messageStarted) return;
+    emitSSE("message_start", {
+      type: "message_start",
+      message: {
+        id: messageId,
+        type: "message",
+        role: "assistant",
+        content: [],
+        model,
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 0, output_tokens: 0 }
+      }
+    });
+    messageStarted = true;
+  }
+  function closeCurrentBlock() {
+    if (isToolUse || hasStartedTextBlock || hasStartedThinkingBlock) {
+      emitSSE("content_block_stop", { type: "content_block_stop", index: contentBlockIndex });
+    }
+  }
+  function processDelta(delta, parsed) {
+    if (parsed.usage) {
+      lastUsage = {
+        input_tokens: extractUncachedInputTokens(parsed.usage),
+        output_tokens: extractOutputTokens(parsed.usage),
+        cache_read_input_tokens: extractCachedTokens(parsed.usage),
+        cache_creation_input_tokens: 0
+      };
+    }
+    if (parsed.choices?.[0]?.finish_reason) {
+      finishReason = parsed.choices[0].finish_reason;
+    }
+    if (delta.tool_calls?.length > 0) {
+      for (const toolCall of delta.tool_calls) {
+        if (toolCall.id && toolCall.id !== currentToolCallId) {
+          closeCurrentBlock();
+          isToolUse = true;
+          hasStartedTextBlock = false;
+          hasStartedThinkingBlock = false;
+          currentToolCallId = toolCall.id;
+          contentBlockIndex++;
+          emitMessageStart();
+          emitSSE("content_block_start", {
+            type: "content_block_start",
+            index: contentBlockIndex,
+            content_block: { type: "tool_use", id: toolCall.id, name: toolCall.function?.name, input: {} }
+          });
+        }
+        if (toolCall.function?.arguments) {
+          emitSSE("content_block_delta", {
+            type: "content_block_delta",
+            index: contentBlockIndex,
+            delta: { type: "input_json_delta", partial_json: toolCall.function.arguments }
+          });
+        }
+      }
+      return;
+    }
+    if (delta.reasoning_content) {
+      if (isToolUse || hasStartedTextBlock) {
+        closeCurrentBlock();
+        isToolUse = false;
+        hasStartedTextBlock = false;
+        currentToolCallId = null;
+        contentBlockIndex++;
+      }
+      if (!hasStartedThinkingBlock) {
+        if (contentBlockIndex < 0) contentBlockIndex = 0;
+        emitMessageStart();
+        emitSSE("content_block_start", {
+          type: "content_block_start",
+          index: contentBlockIndex,
+          content_block: { type: "thinking", thinking: "", signature: "" }
+        });
+        hasStartedThinkingBlock = true;
+      }
+      emitSSE("content_block_delta", {
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: { type: "thinking_delta", thinking: delta.reasoning_content }
+      });
+      return;
+    }
+    if (delta.content) {
+      if (isToolUse || hasStartedThinkingBlock) {
+        closeCurrentBlock();
+        isToolUse = false;
+        hasStartedThinkingBlock = false;
+        currentToolCallId = null;
+        contentBlockIndex++;
+      }
+      if (!hasStartedTextBlock) {
+        if (contentBlockIndex < 0) contentBlockIndex = 0;
+        emitMessageStart();
+        emitSSE("content_block_start", {
+          type: "content_block_start",
+          index: contentBlockIndex,
+          content_block: { type: "text", text: "" }
+        });
+        hasStartedTextBlock = true;
+      }
+      emitSSE("content_block_delta", {
+        type: "content_block_delta",
+        index: contentBlockIndex,
+        delta: { type: "text_delta", text: delta.content }
+      });
+    }
+  }
+  function processLine(line) {
+    if (!line.startsWith("data: ")) return;
+    const data = line.slice(6).trim();
+    if (data === "[DONE]") return;
+    try {
+      const parsed = JSON.parse(data);
+      const delta = parsed.choices?.[0]?.delta;
+      if (delta) processDelta(delta, parsed);
+    } catch {
+    }
+  }
+  function finish() {
+    closeCurrentBlock();
+    let stopReason = "end_turn";
+    if (finishReason === "tool_calls") stopReason = "tool_use";
+    else if (finishReason === "length") stopReason = "max_tokens";
+    emitSSE("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: lastUsage || { input_tokens: 0, output_tokens: 0 }
+    });
+    emitSSE("message_stop", { type: "message_stop" });
+    output.push(null);
+  }
+  const decoder = new TextDecoder();
+  upstreamBody.on("data", (chunk) => {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (line.trim()) processLine(line);
+    }
+  });
+  upstreamBody.on("end", () => {
+    if (buffer.trim()) processLine(buffer);
+    finish();
+  });
+  upstreamBody.on("error", () => {
+    finish();
+  });
+  return output;
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+    req.on("error", reject);
+  });
+}
+function extractApiKey(req) {
+  const xApiKey = req.headers["x-api-key"];
+  if (typeof xApiKey === "string") return xApiKey;
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string") return auth.replace("Bearer ", "").trim();
+  return null;
+}
+function sendJson(res, status, body) {
+  const json = JSON.stringify(body);
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(json);
+}
+function anthropicError(res, status, message) {
+  sendJson(res, status, {
+    type: "error",
+    error: { type: "api_error", message }
+  });
+}
+function startProxy(upstreamBaseUrl) {
+  const upstreamUrl = `${upstreamBaseUrl}/v1/chat/completions`;
+  const server = createServer(async (req, res) => {
+    if (req.method === "POST" && req.url === "/v1/messages") {
+      const apiKey = extractApiKey(req);
+      if (!apiKey) {
+        anthropicError(res, 401, "Missing API key");
+        return;
+      }
+      let anthropicBody;
+      try {
+        const raw = await readBody(req);
+        anthropicBody = JSON.parse(raw);
+      } catch {
+        anthropicError(res, 400, "Invalid JSON body");
+        return;
+      }
+      const originalModel = anthropicBody.model;
+      const openaiBody = translateRequest(anthropicBody);
+      let upstreamRes;
+      try {
+        upstreamRes = await fetch(upstreamUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`
+          },
+          body: JSON.stringify(openaiBody)
+        });
+      } catch (err) {
+        anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+      if (!upstreamRes.ok) {
+        const errBody = await upstreamRes.text();
+        res.writeHead(upstreamRes.status, { "Content-Type": upstreamRes.headers.get("content-type") || "application/json" });
+        res.end(errBody);
+        return;
+      }
+      if (openaiBody.stream && upstreamRes.body) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive"
+        });
+        const nodeStream = Readable.fromWeb(upstreamRes.body);
+        const translated = translateStream(nodeStream, originalModel);
+        translated.pipe(res);
+        return;
+      }
+      const openaiData = await upstreamRes.json();
+      const anthropicResponse = translateResponse(openaiData, originalModel);
+      sendJson(res, 200, anthropicResponse);
+      return;
+    }
+    anthropicError(res, 404, `Unknown endpoint: ${req.method} ${req.url}`);
+  });
+  return new Promise((resolve, reject) => {
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        reject(new Error("Failed to bind proxy"));
+        return;
+      }
+      resolve({
+        port: addr.port,
+        close: () => server.close()
+      });
+    });
+  });
 }
 
 // src/config.ts
@@ -300,6 +748,9 @@ function setSubscriptionTier(tier) {
 import * as p from "@clack/prompts";
 import pc from "picocolors";
 function modelLabel(model, showBackendBadge = false) {
+  if (model.modelFormat === "unsupported") {
+    return pc.dim(`${model.name} (not yet supported)`);
+  }
   if (model.isFree) {
     const tag = showBackendBadge ? "(free \xB7 Zen)" : "(free)";
     return pc.green(`${model.name} ${tag}`);
@@ -308,7 +759,8 @@ function modelLabel(model, showBackendBadge = false) {
 }
 function modelHint(model) {
   const parts = [];
-  if (!model.isAnthropicNative) parts.push("translated");
+  if (model.modelFormat === "openai") parts.push("via proxy");
+  else if (model.modelFormat === "unsupported") parts.push("needs format support");
   if (!model.isFree) parts.push(`${model.brand} \xB7 ${model.id}`);
   else parts.push(model.id);
   return parts.join(" \xB7 ");
@@ -376,7 +828,12 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
   } else {
     models = selectorBackendId === "go" ? modelsByBackend.go : modelsByBackend.zen;
   }
-  const { free, byBrand } = groupModels(models);
+  const selectableModels = [];
+  const unsupportedModels = [];
+  for (const m of models) {
+    (m.modelFormat === "unsupported" ? unsupportedModels : selectableModels).push(m);
+  }
+  const { free, byBrand } = groupModels(selectableModels);
   const options = [];
   for (const m of free) {
     options.push({ value: m.id, label: modelLabel(m, showBackendBadge), hint: modelHint(m) });
@@ -404,7 +861,15 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
     p.cancel("Cancelled.");
     return null;
   }
-  const selectedModel = models.find((m) => m.id === String(modelId));
+  if (unsupportedModels.length > 0) {
+    const brandCounts = unsupportedModels.reduce((acc, m) => {
+      acc[m.brand] = (acc[m.brand] ?? 0) + 1;
+      return acc;
+    }, {});
+    const summary = Object.entries(brandCounts).map(([b, c]) => `${b} (${c})`).join(", ");
+    p.log.info(pc.dim(`Not yet supported: ${summary} \u2014 need API format translation`));
+  }
+  const selectedModel = selectableModels.find((m) => m.id === String(modelId));
   const backend = BACKENDS[selectedModel.sourceBackend];
   if (conflicts.length > 0) {
     const lines = conflicts.map((c) => `  ${pc.dim(c.name)}=${pc.dim(c.value)}`).join("\n");
@@ -471,16 +936,24 @@ ${pc2.bold("Examples:")}
   opencode-starter -- --dangerously-skip-permissions
 `);
 }
-function printDryRun(backendName, modelId, baseUrl, claudeArgs, conflicts, disableExperimentalBetas) {
+function printDryRun(backendName, modelId, baseUrl, modelFormat, claudeArgs, conflicts, disableExperimentalBetas) {
   console.log("");
   console.log(pc2.bold(pc2.cyan("  DRY RUN \u2014 would execute:")));
   console.log("");
   const claudeCmd = ["claude", "--model", modelId, ...claudeArgs].join(" ");
   console.log(`  ${pc2.bold("Command:")}  ${claudeCmd}`);
   console.log(`  ${pc2.bold("Backend:")}  ${backendName}`);
+  if (modelFormat === "openai") {
+    console.log(`  ${pc2.bold("Proxy:")}    would start local translation proxy ${pc2.dim("(Anthropic \u2192 OpenAI)")}`);
+    console.log(`             ${pc2.dim(`\u2192 ${baseUrl}/v1/chat/completions`)}`);
+  }
   console.log("");
   console.log(`  ${pc2.bold("Env vars SET:")}`);
-  console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
+  if (modelFormat === "openai") {
+    console.log(`    ANTHROPIC_BASE_URL=http://127.0.0.1:<port>  ${pc2.dim("(local proxy)")}`);
+  } else {
+    console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
+  }
   console.log(`    ANTHROPIC_API_KEY=<your OPENCODE_API_KEY>`);
   console.log(`    ANTHROPIC_MODEL=${modelId}`);
   if (disableExperimentalBetas) {
@@ -790,13 +1263,26 @@ async function main() {
       selection.backend.name,
       selection.model.id,
       selection.backend.baseUrl,
+      selection.model.modelFormat,
       claudeArgs,
       conflicts,
       disableExperimentalBetas
     );
     return;
   }
-  const childEnv = buildChildEnv(selection.backend, selection.model.id, effectiveKey);
+  let proxyHandle = null;
+  if (selection.model.modelFormat === "openai") {
+    try {
+      proxyHandle = await startProxy(selection.backend.baseUrl);
+      p2.log.info(
+        `Translation proxy started on port ${proxyHandle.port} ` + pc2.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
+      );
+    } catch (err) {
+      p2.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+  const childEnv = buildChildEnv(selection.backend, selection.model.id, effectiveKey, proxyHandle?.port);
   childEnv["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1";
   const debugLogPath = join3(tmpdir(), "opencode-starter-debug.log");
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
@@ -804,9 +1290,12 @@ async function main() {
     p2.log.info(`Debug log: ${debugLogPath}`);
   }
   const exitCode = await launchClaude(childEnv, selection.model.id, [...traceArgs, ...claudeArgs]);
+  if (proxyHandle) {
+    proxyHandle.close();
+  }
   if (trace && existsSync2(debugLogPath)) {
-    const log2 = readFileSync2(debugLogPath, "utf8");
-    const errorLines = log2.split("\n").filter(
+    const log3 = readFileSync2(debugLogPath, "utf8");
+    const errorLines = log3.split("\n").filter(
       (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
     );
     console.log("\n" + pc2.bold(pc2.cyan("\u2500\u2500 Debug trace \u2500\u2500")));

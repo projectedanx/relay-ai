@@ -1,7 +1,7 @@
 // src/constants.ts
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { BackendConfig } from './types.js';
+import type { BackendConfig, ModelFormat } from './types.js';
 
 export const BACKENDS: Record<'zen' | 'go', BackendConfig> = {
   zen: {
@@ -45,26 +45,29 @@ export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models
 
 export const MODELS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
-// Models confirmed broken on OpenCode — hidden until fixed upstream.
-// Tested 2026-06-05 against /v1/messages with Anthropic message format.
-// 401 = promotion ended. 400 = translation layer rejects Anthropic format.
-export const BLOCKED_MODELS = new Set([
-  // Zen free
+// Models whose "free" status is stale — promotion ended but API still lists them.
+// Filtered to avoid misleading users into selecting a non-functional free model.
+export const STALE_FREE_MODELS = new Set([
   'qwen3.6-plus-free',       // 401 — free promotion ended
-  'deepseek-v4-flash-free',  // 400 — DeepSeek rejects Anthropic message format
-  'mimo-v2.5-free',          // 400 — rejects Anthropic message format
-  'nemotron-3-super-free',   // 400 — rejects Anthropic message format
-  'nemotron-3-ultra-free',   // 400 — rejects Anthropic message format
-  // Go
-  'kimi-k2.6',               // 400 — rejects Anthropic message format
-  'kimi-k2.5',               // 400 — rejects Anthropic message format
-  'deepseek-v4-pro',         // 400 — DeepSeek rejects Anthropic message format
-  'deepseek-v4-flash',       // 400 — DeepSeek rejects Anthropic message format
-  'mimo-v2-pro',             // 400 — rejects Anthropic message format
-  'mimo-v2-omni',            // 400 — rejects Anthropic message format
-  'mimo-v2.5-pro',           // 400 — rejects Anthropic message format
-  'mimo-v2.5',               // 400 — rejects Anthropic message format
-  'hy3-preview',             // 400 — rejects Anthropic message format
 ]);
+
+// Classify a model's API format based on cache provider data or ID heuristics.
+// Used to decide whether to route directly or through the translation proxy.
+export function classifyModelFormat(
+  modelId: string,
+  providerNpm: string | undefined,
+): ModelFormat {
+  if (providerNpm === '@ai-sdk/anthropic') return 'anthropic';
+  if (providerNpm === '@ai-sdk/openai') return 'unsupported';
+  if (providerNpm === '@ai-sdk/google') return 'unsupported';
+
+  // Fallback: ID-prefix heuristics for models not in cache
+  const lower = modelId.toLowerCase();
+  if (lower.startsWith('claude-')) return 'anthropic';
+  if (lower.startsWith('gpt-')) return 'unsupported';
+  if (lower.startsWith('gemini-')) return 'unsupported';
+
+  return 'openai';
+}
 
 export const VERSION = '0.1.0';

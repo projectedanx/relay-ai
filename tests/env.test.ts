@@ -113,4 +113,14 @@ describe('buildChildEnv', () => {
     expect(env['PATH']).toBe(process.env['PATH']);
     expect(env['HOME']).toBe(process.env['HOME']);
   });
+
+  it('uses proxy URL when proxyPort is provided', () => {
+    const env = buildChildEnv(BACKENDS.zen, 'deepseek-v4-flash', 'my-key', 12345);
+    expect(env['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:12345');
+  });
+
+  it('uses backend URL when proxyPort is not provided', () => {
+    const env = buildChildEnv(BACKENDS.go, 'minimax-m3', 'my-key');
+    expect(env['ANTHROPIC_BASE_URL']).toBe('https://opencode.ai/zen/go');
+  });
 });

@@ -6,6 +6,9 @@ import { BACKENDS } from './constants.js';
 import { groupModels } from './models.js';
 
 function modelLabel(model: ModelInfo, showBackendBadge = false): string {
+  if (model.modelFormat === 'unsupported') {
+    return pc.dim(`${model.name} (not yet supported)`);
+  }
   if (model.isFree) {
     const tag = showBackendBadge ? '(free · Zen)' : '(free)';
     return pc.green(`${model.name} ${tag}`);
@@ -15,7 +18,8 @@ function modelLabel(model: ModelInfo, showBackendBadge = false): string {
 
 function modelHint(model: ModelInfo): string {
   const parts: string[] = [];
-  if (!model.isAnthropicNative) parts.push('translated');
+  if (model.modelFormat === 'openai') parts.push('via proxy');
+  else if (model.modelFormat === 'unsupported') parts.push('needs format support');
   if (!model.isFree) parts.push(`${model.brand} · ${model.id}`);
   else parts.push(model.id);
   return parts.join(' · ');
@@ -102,8 +106,15 @@ export async function runWizard(
     models = selectorBackendId === 'go' ? modelsByBackend.go : modelsByBackend.zen;
   }
 
+  // Partition selectable vs unsupported (GPT/Gemini need formats we don't translate yet)
+  const selectableModels: ModelInfo[] = [];
+  const unsupportedModels: ModelInfo[] = [];
+  for (const m of models) {
+    (m.modelFormat === 'unsupported' ? unsupportedModels : selectableModels).push(m);
+  }
+
   // Build model selector options
-  const { free, byBrand } = groupModels(models);
+  const { free, byBrand } = groupModels(selectableModels);
 
   const options: Array<{ value: string; label: string; hint: string }> = [];
 
@@ -143,7 +154,17 @@ export async function runWizard(
     return null;
   }
 
-  const selectedModel = models.find(m => m.id === String(modelId))!;
+  // Show note about unsupported models if any were partitioned out
+  if (unsupportedModels.length > 0) {
+    const brandCounts = unsupportedModels.reduce<Record<string, number>>((acc, m) => {
+      acc[m.brand] = (acc[m.brand] ?? 0) + 1;
+      return acc;
+    }, {});
+    const summary = Object.entries(brandCounts).map(([b, c]) => `${b} (${c})`).join(', ');
+    p.log.info(pc.dim(`Not yet supported: ${summary} — need API format translation`));
+  }
+
+  const selectedModel = selectableModels.find(m => m.id === String(modelId))!;
   // Backend is always determined by which model was picked (critical for 'go' tier
   // where Zen free models and Go paid models coexist in the same list).
   const backend = BACKENDS[selectedModel.sourceBackend];

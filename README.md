@@ -6,10 +6,10 @@ opencode-starter is an interactive CLI wizard that configures and launches AI co
 
 ## Features
 
-- **Backend selector** — choose OpenCode Zen (66+ models, free tier) or OpenCode Go (17 models, subscription)
+- **Backend selector** — choose OpenCode Zen (free tier + subscription) or OpenCode Go (subscription)
 - **Subscription-aware** — tells the wizard what you have access to (free / Zen / Go / both), filters models accordingly
 - **Free models highlighted** — green `(free)` label makes it easy to spot zero-cost options
-- **Protocol transparency** — models that use server-side translation are labeled `(translated)` so you know what you're picking
+- **Built-in translation proxy** — models using OpenAI format are automatically routed through a local translation proxy so Claude Code talks to them in Anthropic format; labeled `(via proxy)` in the list
 - **Clean environment isolation** — removes conflicting env vars (Vertex AI, Bedrock, AWS, Foundry) before launch; **never modifies `~/.claude/settings.json`**
 - **Secure key storage** — stores your API key in the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or your shell profile — your choice
 - **Cross-platform** — macOS, Windows, and Linux (Ubuntu, Fedora, and other distros with GNOME Keyring or KWallet)
@@ -102,12 +102,17 @@ When the tool exits — for any reason (normal exit, Ctrl+C, terminal close) —
 
 ### Model compatibility
 
-OpenCode Zen and Go expose all models via the Anthropic Messages API (`/v1/messages`), with protocol translation handled server-side. Models are labeled:
+OpenCode exposes models through different API formats. opencode-starter handles all of them transparently:
 
-- **No label** — natively Anthropic protocol (Claude, Qwen Plus, MiniMax M3)
-- **(translated)** — protocol translated by OpenCode (DeepSeek, GLM, Kimi, GPT, Gemini, etc.)
+| Model format | Examples | How it works | Label |
+|---|---|---|---|
+| Anthropic native | Claude, Qwen, MiniMax (Go) | Direct connection to OpenCode | *(none)* |
+| OpenAI compatible | DeepSeek, Kimi, MiMo, GLM, Nemotron, Grok | Local translation proxy (Anthropic↔OpenAI) | `via proxy` |
+| Not yet supported | GPT, Gemini | Needs format support not yet implemented | `not yet supported` |
 
-For translated models, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is automatically set to prevent beta header rejection from the translation layer.
+The translation proxy starts automatically on a random local port when you select an OpenAI-compatible model, and stops when Claude Code exits. No configuration needed.
+
+`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is automatically set for all sessions to prevent beta header issues with the OpenCode proxy layer.
 
 ### API key storage
 

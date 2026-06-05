@@ -1,7 +1,7 @@
 // src/models.ts
 import { readFileSync } from 'node:fs';
 import type { ModelInfo, BackendConfig } from './types.js';
-import { OPENCODE_CACHE_PATH, BLOCKED_MODELS } from './constants.js';
+import { OPENCODE_CACHE_PATH, STALE_FREE_MODELS, classifyModelFormat } from './constants.js';
 
 const BRAND_MAP: Array<[string, string]> = [
   ['claude', 'Claude'],
@@ -57,14 +57,14 @@ export function readModelsFromCache(
         entry.cost !== undefined &&
         entry.cost.input === 0 &&
         entry.cost.output === 0;
-      const isAnthropicNative = entry.provider?.npm === '@ai-sdk/anthropic';
+      const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
       result.set(entry.id, {
         id: entry.id,
         name: entry.name ?? entry.id,
         isFree,
         brand: deriveBrand(entry.family ?? ''),
-        isAnthropicNative,
         sourceBackend: backendId,
+        modelFormat,
         cost: entry.cost,
       });
     }
@@ -82,7 +82,7 @@ export async function fetchModelsFromApi(backend: BackendConfig): Promise<string
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 5000);
   try {
-    const res = await fetch(`${backend.baseUrl}/models`, {
+    const res = await fetch(`${backend.baseUrl}/v1/models`, {
       signal: controller.signal,
       headers: { Authorization: 'Bearer test' },
     });
@@ -99,17 +99,21 @@ export function mergeModels(
   cache: Map<string, ModelInfo> | null,
   backendId: 'zen' | 'go',
 ): ModelInfo[] {
-  return apiIds.filter(id => !BLOCKED_MODELS.has(id)).map(id => {
-    const cached = cache?.get(id);
-    return cached ?? {
-      id,
-      name: id,
-      isFree: false,
-      brand: 'Other',
-      isAnthropicNative: false,
-      sourceBackend: backendId,
-    };
-  });
+  return apiIds
+    .filter(id => !STALE_FREE_MODELS.has(id))
+    .map(id => {
+      const cached = cache?.get(id);
+      if (cached) return { ...cached, sourceBackend: backendId };
+      const modelFormat = classifyModelFormat(id, undefined);
+      return {
+        id,
+        name: id,
+        isFree: false,
+        brand: 'Other',
+        sourceBackend: backendId,
+        modelFormat,
+      };
+    });
 }
 
 export function groupModels(models: ModelInfo[]): {

@@ -8,6 +8,9 @@ import { execSync } from 'node:child_process';
 import { findClaudeBinary, launchClaude } from './launch.js';
 import { resolveApiKey, detectConflicts, buildChildEnv } from './env.js';
 import { getModels } from './models.js';
+import { startProxy } from './proxy.js';
+import type { ProxyHandle } from './proxy.js';
+import type { ModelFormat } from './types.js';
 import { loadPreferences, savePreferences, getCachedModels, setCachedModels, getSubscriptionTier, setSubscriptionTier } from './config.js';
 import { runWizard, askSubscriptionTier } from './prompts.js';
 import { BACKENDS, VERSION } from './constants.js';
@@ -67,6 +70,7 @@ function printDryRun(
   backendName: string,
   modelId: string,
   baseUrl: string,
+  modelFormat: ModelFormat,
   claudeArgs: string[],
   conflicts: Array<{ name: string; value: string }>,
   disableExperimentalBetas: boolean,
@@ -78,10 +82,18 @@ function printDryRun(
   const claudeCmd = ['claude', '--model', modelId, ...claudeArgs].join(' ');
   console.log(`  ${pc.bold('Command:')}  ${claudeCmd}`);
   console.log(`  ${pc.bold('Backend:')}  ${backendName}`);
+  if (modelFormat === 'openai') {
+    console.log(`  ${pc.bold('Proxy:')}    would start local translation proxy ${pc.dim('(Anthropic → OpenAI)')}`);
+    console.log(`             ${pc.dim(`→ ${baseUrl}/v1/chat/completions`)}`);
+  }
   console.log('');
 
   console.log(`  ${pc.bold('Env vars SET:')}`);
-  console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
+  if (modelFormat === 'openai') {
+    console.log(`    ANTHROPIC_BASE_URL=http://127.0.0.1:<port>  ${pc.dim('(local proxy)')}`);
+  } else {
+    console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
+  }
   console.log(`    ANTHROPIC_API_KEY=<your OPENCODE_API_KEY>`);
   console.log(`    ANTHROPIC_MODEL=${modelId}`);
   if (disableExperimentalBetas) {
@@ -425,6 +437,7 @@ async function main(): Promise<void> {
       selection.backend.name,
       selection.model.id,
       selection.backend.baseUrl,
+      selection.model.modelFormat,
       claudeArgs,
       conflicts,
       disableExperimentalBetas,
@@ -432,7 +445,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  const childEnv = buildChildEnv(selection.backend, selection.model.id, effectiveKey);
+  // Start translation proxy for models that use OpenAI chat completions format
+  let proxyHandle: ProxyHandle | null = null;
+  if (selection.model.modelFormat === 'openai') {
+    try {
+      proxyHandle = await startProxy(selection.backend.baseUrl);
+      p.log.info(
+        `Translation proxy started on port ${proxyHandle.port} ` +
+        pc.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`),
+      );
+    } catch (err) {
+      p.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+
+  const childEnv = buildChildEnv(selection.backend, selection.model.id, effectiveKey, proxyHandle?.port);
   childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
 
   // --trace: write Claude Code debug logs so we can see the actual API error
@@ -444,9 +472,13 @@ async function main(): Promise<void> {
 
   const exitCode = await launchClaude(childEnv, selection.model.id, [...traceArgs, ...claudeArgs]);
 
+  // Stop translation proxy after Claude exits
+  if (proxyHandle) {
+    proxyHandle.close();
+  }
+
   if (trace && existsSync(debugLogPath)) {
     const log = readFileSync(debugLogPath, 'utf8');
-    // Extract error lines — the most useful signal
     const errorLines = log.split('\n').filter(l =>
       l.includes('error') || l.includes('Error') || l.includes('"type":"error"') || l.includes('status')
     );

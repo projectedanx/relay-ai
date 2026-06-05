@@ -1,5 +1,7 @@
 // src/types.ts
 
+export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
+
 export interface BackendConfig {
   id: 'zen' | 'go';
   name: string;
@@ -18,8 +20,8 @@ export interface ModelInfo {
   name: string;
   isFree: boolean;
   brand: string;
-  isAnthropicNative: boolean;
   sourceBackend: 'zen' | 'go';
+  modelFormat: ModelFormat;
   cost?: ModelCost;
 }
 
