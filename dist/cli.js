@@ -96,6 +96,10 @@ var CONFLICTING_ENV_VARS = [
 ];
 var OPENCODE_CACHE_PATH = join2(homedir2(), ".cache", "opencode", "models.json");
 var MODELS_CACHE_TTL_MS = 60 * 60 * 1e3;
+var BLOCKED_MODELS = /* @__PURE__ */ new Set([
+  "qwen3.6-plus-free",
+  "deepseek-v4-flash-free"
+]);
 var VERSION = "0.1.0";
 
 // src/env.ts
@@ -182,7 +186,7 @@ async function fetchModelsFromApi(backend) {
   }
 }
 function mergeModels(apiIds, cache, backendId) {
-  return apiIds.map((id) => {
+  return apiIds.filter((id) => !BLOCKED_MODELS.has(id)).map((id) => {
     const cached = cache?.get(id);
     return cached ?? {
       id,

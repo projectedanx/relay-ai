@@ -1,7 +1,7 @@
 // src/models.ts
 import { readFileSync } from 'node:fs';
 import type { ModelInfo, BackendConfig } from './types.js';
-import { OPENCODE_CACHE_PATH } from './constants.js';
+import { OPENCODE_CACHE_PATH, BLOCKED_MODELS } from './constants.js';
 
 const BRAND_MAP: Array<[string, string]> = [
   ['claude', 'Claude'],
@@ -99,7 +99,7 @@ export function mergeModels(
   cache: Map<string, ModelInfo> | null,
   backendId: 'zen' | 'go',
 ): ModelInfo[] {
-  return apiIds.map(id => {
+  return apiIds.filter(id => !BLOCKED_MODELS.has(id)).map(id => {
     const cached = cache?.get(id);
     return cached ?? {
       id,

@@ -45,4 +45,12 @@ export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models
 
 export const MODELS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+// Models confirmed broken on OpenCode — hidden until fixed upstream.
+// qwen3.6-plus-free: free promotion ended (401)
+// deepseek-v4-flash-free: tool translation bug — missing `name` field (400)
+export const BLOCKED_MODELS = new Set([
+  'qwen3.6-plus-free',
+  'deepseek-v4-flash-free',
+]);
+
 export const VERSION = '0.1.0';
