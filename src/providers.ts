@@ -39,8 +39,6 @@ export function findOpencodeBinary(): string | null {
   return null;
 }
 
-// ---- Raw types (internal) ----
-
 interface RawModel {
   id: string;
   name?: string;
@@ -55,8 +53,6 @@ interface RawProvider {
   key?: string;
   models?: Record<string, RawModel>;
 }
-
-// ---- Pure functions ----
 
 export function resolveEndpoint(
   npm: string,
@@ -143,8 +139,6 @@ export function normalizeProviders(raw: RawProvider[]): LocalProvider[] {
 
   return result;
 }
-
-// ---- Async function (spawns real process) ----
 
 export async function fetchLocalProviders(): Promise<LocalProvider[] | null> {
   const binary = findOpencodeBinary();

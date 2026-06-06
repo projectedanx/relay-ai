@@ -451,22 +451,17 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return 1;
   }
 
-  // Load prefs and conflicts early (before any prompts)
   const prefs = dryRun ? {} as ReturnType<typeof loadPreferences> : loadPreferences();
   const conflicts = detectConflicts();
 
-  // Show intro once at the top
   p.intro(pc.bold('  OpenCode Starter'));
 
-  // Fetch local providers (opencode must be installed locally)
   const localProviders = await fetchLocalProviders();
 
   if (localProviders === null) {
-    // opencode not installed — tip shown, proceed to cloud flow
     p.log.info(pc.dim('Tip: Install OpenCode locally to unlock additional providers'));
   }
 
-  // Provider selector — shown when opencode is installed and has providers
   let providerChoice: string = 'opencode';
   if (localProviders !== null && localProviders.length > 0) {
     const providerOptions: Array<{ value: string; label: string; hint: string }> = [
@@ -531,7 +526,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     if (selectedModel.modelFormat === 'anthropic') {
       childEnv = buildChildEnv(selectedModel.baseUrl!, selectedModel.id, provider.apiKey);
     } else {
-      // openai format — start translation proxy
       try {
         proxyHandle = await startProxy(selectedModel.completionsUrl!, selectedModel.id, trace);
         p.log.info(

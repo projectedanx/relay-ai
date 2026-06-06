@@ -28,15 +28,25 @@ npm run build && opencode-starter --version
 
 **Entry point:** `src/cli.ts` orchestrates the full flow. Every other module is a focused unit with no side effects at import time.
 
-**Data flow:**
+**Data flow (`opencode-starter claude`):**
 ```
 cli.ts
+  → findClaudeBinary()         [launch.ts — locate claude binary]
+  → fetchLocalProviders()      [providers.ts — ephemeral opencode serve, GET /config/providers, normalize]
+  → p.select "Which provider?" [shown when local providers are available]
+
+  ── OpenCode cloud path (default) ──
   → resolveOrCollectApiKey()   [reads env, OS credential store (all platforms), or prompts user]
   → askSubscriptionTier()      [prompts.ts — one-time question, saved to conf store]
   → getModels()                [models.ts — API fetch + cache enrichment + format classification]
   → runWizard()                [prompts.ts — backend/model selector, filters unsupported]
-  → startProxy()               [proxy.ts — only for OpenAI-format models, translates Anthropic↔OpenAI]
-  → buildChildEnv()            [env.ts — removes 17 conflicting vars, sets 3 OpenCode vars]
+
+  ── Local provider path ──
+  → pickLocalModel()           [prompts.ts — filter/select model from local provider]
+
+  ── Shared launch ──
+  → startProxy()               [proxy.ts — only for OpenAI-format models; takes full completionsUrl]
+  → buildChildEnv(baseUrl, …)  [env.ts — removes 17 conflicting vars, sets 3 OpenCode vars]
   → launchClaude()             [launch.ts — spawn with stdio:inherit]
   → proxyHandle.close()        [stops proxy after Claude exits]
 ```
@@ -54,7 +64,7 @@ cli.ts
   - Everything else → `'openai'` (routed through local translation proxy)
 - `sourceBackend`: set from the backend that was queried — critical for `go` tier which shows Zen free models + Go paid models in one list, so the correct `ANTHROPIC_BASE_URL` can be set per selected model
 
-**Translation proxy** (`src/proxy.ts`): For models using OpenAI `/chat/completions` format, a local HTTP proxy starts on `127.0.0.1:<random-port>`. It accepts Anthropic-format requests at `/v1/messages`, translates to OpenAI format, forwards to `{backendUrl}/v1/chat/completions`, and translates responses back. Handles streaming SSE, tool calls, thinking/reasoning blocks, images, and prompt caching. Zero external dependencies — uses Node.js built-in `http` + `fetch`. The proxy starts before Claude Code and stops after it exits. Adapted from [cucoleadan/opencode-cowork-proxy](https://github.com/cucoleadan/opencode-cowork-proxy) (MIT).
+**Translation proxy** (`src/proxy.ts`): For models using OpenAI `/chat/completions` format, a local HTTP proxy starts on `127.0.0.1:<random-port>`. It accepts Anthropic-format requests at `/v1/messages`, translates to OpenAI format, and forwards to the full `completionsUrl` passed by the caller (e.g. `${backend.baseUrl}/v1/chat/completions` for Zen/Go, or a provider-specific URL for local providers). Translates responses back. Handles streaming SSE, tool calls, thinking/reasoning blocks, images, and prompt caching. Zero external dependencies — uses Node.js built-in `http` + `fetch`. The proxy starts before Claude Code and stops after it exits. Adapted from [cucoleadan/opencode-cowork-proxy](https://github.com/cucoleadan/opencode-cowork-proxy) (MIT).
 
 **Subscription tiers** control which models are shown and whether a backend selector appears:
 - `free` / `zen`: always Zen backend, no backend selector
@@ -63,7 +73,7 @@ cli.ts
 
 **Env isolation:** `buildChildEnv()` copies `process.env`, deletes all 17 vars in `CONFLICTING_ENV_VARS`, then sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`. Also always sets `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (OpenCode proxy doesn't support all Anthropic beta headers). The parent process env is never mutated.
 
-**Preferences** (via `conf` package at `~/.config/opencode-starter/config.json`): `lastBackend`, `lastModel`, `subscriptionTier`, and a 1-hour model list cache. All writes are skipped when `dryRun === true`.
+**Preferences** (via `conf` package at `~/.config/opencode-starter/config.json`): `lastBackend`, `lastModel`, `lastProvider`, `subscriptionTier`, and a 1-hour model list cache. All writes are skipped when `dryRun === true`.
 
 **API key storage** uses `@napi-rs/keyring` (installed as `optionalDependencies`) for cross-platform credential store access. The module is loaded via dynamic `import()` so a missing native binary degrades gracefully. `tsup.config.ts` marks it as `external` so esbuild doesn't try to bundle the native `.node` addon.
 
@@ -80,9 +90,11 @@ Save options per platform:
 
 In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is active for the current session regardless of save choice.
 
+**Local provider discovery** (`src/providers.ts`): `fetchLocalProviders()` spawns `opencode serve --port 0`, waits for the listening URL in stdout/stderr, fetches `GET /config/providers`, then kills the process. `normalizeProviders()` (called internally) skips OAuth providers (empty key), skips `opencode`/`opencode-go` (cloud backends handled separately), and classifies each model's format and upstream URL from its `api.npm` package. Known first-party packages (`@ai-sdk/anthropic|openai|google|groq|mistral|xai`) have hardcoded URLs; `@ai-sdk/openai-compatible` providers use the `api.url` from the config. Models with unknown packages are dropped. Google/Gemini is routed via `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` (Google's OpenAI-compatible endpoint). Cost display in Claude Code is inaccurate for non-Anthropic models (Claude Code applies its own pricing table); documented limitation.
+
 **Stale free models:** `STALE_FREE_MODELS` in `constants.ts` contains models whose free promotion ended but the API still returns them. Currently only `qwen3.6-plus-free`. These are filtered out in `mergeModels()`.
 
-**Tests** cover pure functions only: `env.ts` (all 3 functions), `models.ts` (`deriveBrand`, `classifyModelFormat`, `mergeModels`, `groupModels`), and `proxy.ts` (`translateRequest`, `translateResponse`, token extraction). Interactive modules (`prompts.ts`, `launch.ts`) and `config.ts` are verified manually.
+**Tests** cover pure functions only: `env.ts` (all 3 functions), `models.ts` (`deriveBrand`, `classifyModelFormat`, `mergeModels`, `groupModels`), `proxy.ts` (`translateRequest`, `translateResponse`, token extraction), and `providers.ts` (`resolveEndpoint`, `normalizeProviders`). Interactive modules (`prompts.ts`, `launch.ts`) and `config.ts` are verified manually.
 
 ## Key constraints
 

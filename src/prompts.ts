@@ -99,13 +99,11 @@ export async function pickLocalModel(
     filteredModels = provider.models;
   }
 
-  // Sort filtered list by brand then id
   filteredModels = [...filteredModels].sort((a, b) => {
     const brandCmp = a.brand.localeCompare(b.brand);
     return brandCmp !== 0 ? brandCmp : a.id.localeCompare(b.id);
   });
 
-  // Build select options
   const options = filteredModels.map(model => ({
     value: model.id,
     label: model.name !== model.id ? model.name : model.id,
@@ -135,13 +133,11 @@ export async function pickLocalModel(
 
   const selectedModel = filteredModels.find(m => m.id === String(modelId))!;
 
-  // Show conflict warning if any
   if (conflicts.length > 0) {
     const lines = conflicts.map(c => `  ${pc.dim(c.name)}=${pc.dim(c.value)}`).join('\n');
     p.note(lines, pc.yellow('Env vars that will be temporarily overridden:'));
   }
 
-  // Confirm launch
   const confirmed = await p.confirm({
     message: `Launch Claude Code · ${pc.bold(selectedModel.id)} via ${pc.bold(provider.name)}?`,
     initialValue: true,
