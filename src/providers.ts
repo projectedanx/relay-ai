@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { LocalProvider, LocalProviderModel } from './types.js';
 import { deriveBrand } from './models.js';
+import { resolveContextWindow } from './context-window.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -45,6 +46,7 @@ interface RawModel {
   family?: string;
   api?: { npm?: string; url?: string };
   cost?: { input: number; output: number };
+  limit?: { context?: number; output?: number };
 }
 
 interface RawProvider {
@@ -95,6 +97,11 @@ export function resolveEndpoint(
         format: 'openai',
         completionsUrl: 'https://api.x.ai/v1/chat/completions',
       };
+    case '@openrouter/ai-sdk-provider':
+      return {
+        format: 'openai',
+        completionsUrl: (apiUrl || 'https://openrouter.ai/api/v1').replace(/\/$/, '') + '/chat/completions',
+      };
     default:
       return null;
   }
@@ -125,6 +132,7 @@ export function normalizeProviders(raw: RawProvider[]): LocalProvider[] {
         baseUrl: endpoint.baseUrl,
         completionsUrl: endpoint.completionsUrl,
         cost: model.cost,
+        contextWindow: resolveContextWindow(model.id, model.limit?.context),
       });
     }
 

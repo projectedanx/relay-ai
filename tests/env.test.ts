@@ -102,6 +102,15 @@ describe('buildChildEnv', () => {
     expect(env['ANTHROPIC_MODEL']).toBe('claude-sonnet-4-6');
   });
 
+  it('sets CLAUDE_CODE_MAX_CONTEXT_TOKENS from model id for proxy sessions', () => {
+    expect(buildChildEnv(BACKENDS.zen.baseUrl, 'zzzz-unknown-model', 'k')['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('200000');
+  });
+
+  it('uses explicit contextWindow override when provided', () => {
+    expect(buildChildEnv(BACKENDS.zen.baseUrl, 'custom-model', 'k', undefined, 512_000)['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('512000');
+    expect(buildChildEnv(BACKENDS.zen.baseUrl, 'custom-model', 'k', undefined, 1_048_576)['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('1048576');
+  });
+
   it('does NOT mutate process.env', () => {
     buildChildEnv(BACKENDS.zen.baseUrl, 'claude-sonnet-4-6', 'my-key');
     expect(process.env['CLAUDE_CODE_USE_VERTEX']).toBe('1');
@@ -117,6 +126,12 @@ describe('buildChildEnv', () => {
   it('uses proxy URL when proxyPort is provided', () => {
     const env = buildChildEnv(BACKENDS.zen.baseUrl, 'deepseek-v4-flash', 'my-key', 12345);
     expect(env['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:12345');
+  });
+
+  it('restores first-party-like Claude Code behavior for proxy/gateway routes', () => {
+    const env = buildChildEnv(BACKENDS.zen.baseUrl, 'gemini-3.5-flash', 'my-key', 12345);
+    expect(env['ENABLE_TOOL_SEARCH']).toBe('true');
+    expect(env['CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT']).toBe('0');
   });
 
   it('uses backend URL when proxyPort is not provided', () => {

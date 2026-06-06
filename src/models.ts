@@ -1,7 +1,7 @@
 // src/models.ts
-import { readFileSync } from 'node:fs';
 import type { ModelInfo, BackendConfig } from './types.js';
-import { OPENCODE_CACHE_PATH, STALE_FREE_MODELS, classifyModelFormat } from './constants.js';
+import { STALE_FREE_MODELS, classifyModelFormat } from './constants.js';
+import { loadOpencodeCache, resolveContextWindow } from './context-window.js';
 
 const BRAND_MAP: Array<[string, string]> = [
   ['claude', 'Claude'],
@@ -25,53 +25,36 @@ export function deriveBrand(family: string): string {
   return 'Other';
 }
 
-interface CacheModelEntry {
-  id: string;
-  name?: string;
-  family?: string;
-  status?: string;
-  provider?: { npm?: string };
-  cost?: { input: number; output: number };
-}
-
-interface CacheFile {
-  [providerKey: string]: {
-    models?: Record<string, CacheModelEntry>;
-  };
-}
-
 export function readModelsFromCache(
   backendId: 'zen' | 'go',
 ): Map<string, ModelInfo> | null {
-  try {
-    const raw = readFileSync(OPENCODE_CACHE_PATH, 'utf8');
-    const cache = JSON.parse(raw) as CacheFile;
-    const providerKey = backendId === 'zen' ? 'opencode' : 'opencode-go';
-    const providerData = cache[providerKey];
-    if (!providerData?.models) return null;
+  const cache = loadOpencodeCache();
+  if (!cache) return null;
 
-    const result = new Map<string, ModelInfo>();
-    for (const entry of Object.values(providerData.models)) {
-      if (entry.status === 'deprecated') continue;
-      const isFree =
-        entry.cost !== undefined &&
-        entry.cost.input === 0 &&
-        entry.cost.output === 0;
-      const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
-      result.set(entry.id, {
-        id: entry.id,
-        name: entry.name ?? entry.id,
-        isFree,
-        brand: deriveBrand(entry.family ?? ''),
-        sourceBackend: backendId,
-        modelFormat,
-        cost: entry.cost,
-      });
-    }
-    return result;
-  } catch {
-    return null;
+  const providerKey = backendId === 'zen' ? 'opencode' : 'opencode-go';
+  const providerData = cache[providerKey];
+  if (!providerData?.models) return null;
+
+  const result = new Map<string, ModelInfo>();
+  for (const entry of Object.values(providerData.models)) {
+    if (!entry.id || entry.status === 'deprecated') continue;
+    const isFree =
+      entry.cost !== undefined &&
+      entry.cost.input === 0 &&
+      entry.cost.output === 0;
+    const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
+    result.set(entry.id, {
+      id: entry.id,
+      name: entry.name ?? entry.id,
+      isFree,
+      brand: deriveBrand(entry.family ?? ''),
+      sourceBackend: backendId,
+      modelFormat,
+      cost: entry.cost,
+      contextWindow: resolveContextWindow(entry.id, entry.limit?.context),
+    });
   }
+  return result;
 }
 
 interface ApiModelsResponse {
@@ -112,6 +95,7 @@ export function mergeModels(
         brand: 'Other',
         sourceBackend: backendId,
         modelFormat,
+        contextWindow: resolveContextWindow(id),
       };
     });
 }

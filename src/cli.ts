@@ -209,8 +209,12 @@ function printDryRun(
   console.log(`    ANTHROPIC_API_KEY=<your OPENCODE_API_KEY>`);
   console.log(`    ANTHROPIC_MODEL=${modelId}`);
   if (disableExperimentalBetas) {
-    console.log(`    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1  ${pc.dim('(auto-set: model uses protocol translation)')}`);
+    console.log(`    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1  ${pc.dim('(direct upstream — strips beta headers)')}`);
+  } else {
+    console.log(`    ${pc.dim('(experimental betas enabled — tool search via local proxy)')}`);
   }
+  console.log(`    ENABLE_TOOL_SEARCH=true  ${pc.dim('(defer MCP tools like native Claude Code)')}`);
+  console.log(`    CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=0  ${pc.dim('(keep full system prompt on proxy routes)')}`);
   console.log('');
 
   if (conflicts.length > 0) {
@@ -533,10 +537,21 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     let childEnv: NodeJS.ProcessEnv;
 
     if (selectedModel.modelFormat === 'anthropic') {
-      childEnv = buildChildEnv(selectedModel.baseUrl!, selectedModel.id, provider.apiKey);
+      childEnv = buildChildEnv(
+        selectedModel.baseUrl!,
+        selectedModel.id,
+        provider.apiKey,
+        undefined,
+        selectedModel.contextWindow,
+      );
     } else {
       try {
-        proxyHandle = await startProxy(selectedModel.completionsUrl!, selectedModel.id, trace);
+        proxyHandle = await startProxy(
+          selectedModel.completionsUrl!,
+          selectedModel.id,
+          trace,
+          selectedModel.contextWindow,
+        );
         p.log.info(
           `Translation proxy started on port ${proxyHandle.port} ` +
           pc.dim(`(${selectedModel.completionsUrl})`),
@@ -545,10 +560,18 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         p.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
         return 1;
       }
-      childEnv = buildChildEnv(`http://127.0.0.1:${proxyHandle.port}`, selectedModel.id, provider.apiKey, proxyHandle.port);
+      childEnv = buildChildEnv(
+        `http://127.0.0.1:${proxyHandle.port}`,
+        selectedModel.id,
+        provider.apiKey,
+        proxyHandle.port,
+        selectedModel.contextWindow,
+      );
     }
 
-    childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
+    if (selectedModel.modelFormat === 'anthropic') {
+      childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
+    }
 
     const debugLogPath = join(tmpdir(), 'opencode-starter-debug.log');
     const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
@@ -617,9 +640,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   // Persist choices for next run (skipped in dry-run)
   if (!dryRun) savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id, lastProvider: 'opencode' });
 
-  // Always disable experimental betas — OpenCode Zen/Go is a proxy and may not
-  // support all Anthropic-specific beta headers even for Anthropic-native models.
-  const disableExperimentalBetas = true;
+  // Disable experimental betas only for direct (non-proxy) upstream routes — OpenCode
+  // Zen/Go may reject beta headers. Local proxy preserves defer_loading for tool search.
+  const disableExperimentalBetas = selection.model.modelFormat !== 'openai';
 
   if (dryRun) {
     printDryRun(
@@ -638,7 +661,12 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   let proxyHandle: ProxyHandle | null = null;
   if (selection.model.modelFormat === 'openai') {
     try {
-      proxyHandle = await startProxy(`${selection.backend.baseUrl}/v1/chat/completions`, selection.model.id, trace);
+      proxyHandle = await startProxy(
+        `${selection.backend.baseUrl}/v1/chat/completions`,
+        selection.model.id,
+        trace,
+        selection.model.contextWindow,
+      );
       p.log.info(
         `Translation proxy started on port ${proxyHandle.port} ` +
         pc.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`),
@@ -649,8 +677,16 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     }
   }
 
-  const childEnv = buildChildEnv(selection.backend.baseUrl, selection.model.id, effectiveKey, proxyHandle?.port);
-  childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
+  const childEnv = buildChildEnv(
+    selection.backend.baseUrl,
+    selection.model.id,
+    effectiveKey,
+    proxyHandle?.port,
+    selection.model.contextWindow,
+  );
+  if (disableExperimentalBetas) {
+    childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
+  }
 
   // --trace: write Claude Code debug logs so we can see the actual API error
   const debugLogPath = join(tmpdir(), 'opencode-starter-debug.log');

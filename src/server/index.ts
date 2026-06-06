@@ -117,6 +117,7 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
             baseUrl: model.baseUrl,
             completionsUrl: model.completionsUrl,
             apiKey: provider.apiKey, // routing only — never logged or returned in API responses
+            contextWindow: model.contextWindow,
           });
         }
       }

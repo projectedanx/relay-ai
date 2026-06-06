@@ -4,23 +4,11 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { appendFileSync } from 'node:fs';
-import { isGeminiUrl, geminiNativeUrl, translateToGemini, translateFromGemini, translateStreamGemini } from './proxy-gemini.js';
-
-// ── Cache / hash utilities ──────────────────────────────────────────
-
-function hashSystemPrompt(system: string | any[] | undefined): string | null {
-  if (!system) return null;
-  const text = typeof system === 'string'
-    ? system
-    : system.map((s: any) => s.text || '').join('\n');
-  if (!text.trim()) return null;
-  let hash = 5381;
-  for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) + hash) + text.charCodeAt(i);
-    hash = hash & hash;
-  }
-  return 'cache-' + Math.abs(hash).toString(36);
-}
+import { isGeminiUrl, geminiNativeUrl, translateToGemini, translateFromGemini, translateStreamGemini, GEMINI_SKIP_THOUGHT_SIGNATURE } from './proxy-gemini.js';
+import { formatAnthropicModelEntry } from './server/models.js';
+import { parseToolArguments, sseChunk, stripToolUseIdSuffix, splitToolUseId, encodeToolUseId, serializeToolResultContent, attachSseLineReader, extractSseDataPayload } from './proxy-shared.js';
+import type { AnthropicContentBlock, AnthropicMessage, AnthropicMessageRequest, AnthropicRequestContentPart, OpenAIChatCompletion, OpenAIStreamChunk, OpenAIStreamDelta } from './proxy-types.js';
+import { resolveUpstreamTools } from './tool-search.js';
 
 function tokenCount(...values: any[]): number {
   for (const value of values) {
@@ -73,7 +61,7 @@ function translateImageBlock(part: any): any {
   return null;
 }
 
-export function translateRequest(body: any): any {
+export function translateRequest(body: AnthropicMessageRequest): Record<string, unknown> {
   const { model, messages, system, temperature, max_tokens, top_p, stop_sequences, tools, stream } = body;
 
   const openAIMessages = Array.isArray(messages)
@@ -96,8 +84,7 @@ export function translateRequest(body: any): any {
             } else if (part.type === 'thinking') {
               reasoningContent += (typeof part.thinking === 'string' ? part.thinking : JSON.stringify(part.thinking)) + '\n';
             } else if (part.type === 'tool_use') {
-              const [rawId, ...tsParts] = part.id.split('::ts::');
-              const thoughtSignature = tsParts.length > 0 ? tsParts.join('::ts::') : undefined;
+              const { rawId, thoughtSignature } = splitToolUseId(part.id);
               const toolCall: any = {
                 id: rawId,
                 type: 'function',
@@ -130,8 +117,8 @@ export function translateRequest(body: any): any {
             } else if (part.type === 'tool_result') {
               toolResults.push({
                 role: 'tool',
-                tool_call_id: part.tool_use_id.split('::ts::')[0],
-                content: typeof part.content === 'string' ? part.content : JSON.stringify(part.content),
+                tool_call_id: stripToolUseIdSuffix(part.tool_use_id),
+                content: serializeToolResultContent(part.content),
               });
             }
           }
@@ -162,8 +149,9 @@ export function translateRequest(body: any): any {
   if (stream) data.stream_options = { include_usage: true };
   if (stop_sequences) data.stop = stop_sequences;
 
-  if (tools) {
-    data.tools = tools.map((item: any) => ({
+  const upstreamTools = resolveUpstreamTools(tools, messages);
+  if (upstreamTools.length > 0) {
+    data.tools = upstreamTools.map((item: any) => ({
       type: 'function',
       function: {
         name: item.name,
@@ -178,19 +166,9 @@ export function translateRequest(body: any): any {
 
 // ── Response translation: OpenAI → Anthropic ────────────────────────
 
-function parseToolArguments(value: string | undefined): Record<string, unknown> {
-  if (!value) return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-export function translateResponse(completion: any, model: string): any {
+export function translateResponse(completion: OpenAIChatCompletion, model: string): AnthropicMessage {
   const messageId = 'msg_' + Date.now();
-  const content: any[] = [];
+  const content: AnthropicContentBlock[] = [];
   const message = completion.choices?.[0]?.message;
 
   if (message?.reasoning_content) {
@@ -200,12 +178,12 @@ export function translateResponse(completion: any, model: string): any {
     content.push({ text: message.content, type: 'text' });
   }
   if (message?.tool_calls) {
-    content.push(...message.tool_calls.map((item: any) => {
-      const id = item.thought_signature ? `${item.id}::ts::${item.thought_signature}` : item.id;
+    content.push(...message.tool_calls.map((item) => {
+      const id = encodeToolUseId(item.id ?? '', item.thought_signature);
       return {
-        type: 'tool_use',
+        type: 'tool_use' as const,
         id,
-        name: item.function?.name,
+        name: item.function?.name ?? '',
         input: parseToolArguments(item.function?.arguments),
       };
     }));
@@ -216,7 +194,7 @@ export function translateResponse(completion: any, model: string): any {
   if (finishReason === 'tool_calls') stopReason = 'tool_use';
   else if (finishReason === 'length') stopReason = 'max_tokens';
 
-  const result: any = {
+  const result: AnthropicMessage = {
     id: messageId,
     type: 'message',
     role: 'assistant',
@@ -224,25 +202,20 @@ export function translateResponse(completion: any, model: string): any {
     stop_reason: stopReason,
     stop_sequence: null,
     model,
+    usage: completion.usage
+      ? {
+          input_tokens: extractUncachedInputTokens(completion.usage),
+          output_tokens: extractOutputTokens(completion.usage),
+          cache_read_input_tokens: extractCachedTokens(completion.usage),
+          cache_creation_input_tokens: 0,
+        }
+      : { input_tokens: 0, output_tokens: 0 },
   };
-
-  if (completion.usage) {
-    result.usage = {
-      input_tokens: extractUncachedInputTokens(completion.usage),
-      output_tokens: extractOutputTokens(completion.usage),
-      cache_read_input_tokens: extractCachedTokens(completion.usage),
-      cache_creation_input_tokens: 0,
-    };
-  }
 
   return result;
 }
 
 // ── Stream translation: OpenAI SSE → Anthropic SSE ──────────────────
-
-function sseChunk(eventType: string, data: any): string {
-  return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-}
 
 export function translateStream(upstreamBody: NodeJS.ReadableStream, model: string): Readable {
   const messageId = 'msg_' + Date.now();
@@ -255,7 +228,6 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
   let lastUsage: any = null;
   let finishReason: string | null = null;
   let messageStarted = false;
-  let buffer = '';
 
   // Track per-tool-call state by streaming index to capture thought_signature
   // even when it arrives in a separate chunk from the id.
@@ -289,9 +261,7 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
   function flushToolCallStart(streamIndex: number) {
     const state = toolCallState.get(streamIndex);
     if (!state || state.emitted) return;
-    const encodedId = state.thoughtSignature
-      ? `${state.id}::ts::${state.thoughtSignature}`
-      : state.id;
+    const encodedId = encodeToolUseId(state.id, state.thoughtSignature);
     emitSSE('content_block_start', {
       type: 'content_block_start', index: state.blockIndex,
       content_block: { type: 'tool_use', id: encodedId, name: state.name, input: {} },
@@ -303,12 +273,18 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
     if (currentToolCallStreamIndex >= 0) {
       flushToolCallStart(currentToolCallStreamIndex);
     }
+    if (hasStartedThinkingBlock) {
+      emitSSE('content_block_delta', {
+        type: 'content_block_delta', index: contentBlockIndex,
+        delta: { type: 'signature_delta', signature: GEMINI_SKIP_THOUGHT_SIGNATURE },
+      });
+    }
     if (isToolUse || hasStartedTextBlock || hasStartedThinkingBlock) {
       emitSSE('content_block_stop', { type: 'content_block_stop', index: contentBlockIndex });
     }
   }
 
-  function processDelta(delta: any, parsed: any) {
+  function processDelta(delta: OpenAIStreamDelta, parsed: OpenAIStreamChunk) {
     if (parsed.usage) {
       lastUsage = {
         input_tokens: extractUncachedInputTokens(parsed.usage),
@@ -323,7 +299,7 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
 
     // Tool calls — defer content_block_start until first argument arrives so
     // thought_signature has a chance to appear (it may come in a later chunk).
-    if (delta.tool_calls?.length > 0) {
+    if (delta.tool_calls && delta.tool_calls.length > 0) {
       for (const toolCall of delta.tool_calls) {
         const streamIndex = toolCall.index ?? 0;
 
@@ -415,9 +391,8 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
   }
 
   function processLine(line: string) {
-    if (!line.startsWith('data: ')) return;
-    const data = line.slice(6).trim();
-    if (data === '[DONE]') return;
+    const data = extractSseDataPayload(line);
+    if (!data) return;
     try {
       const parsed = JSON.parse(data);
       const delta = parsed.choices?.[0]?.delta;
@@ -427,6 +402,7 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
 
   function finish() {
     closeCurrentBlock();
+    emitMessageStart();
 
     let stopReason = 'end_turn';
     if (finishReason === 'tool_calls') stopReason = 'tool_use';
@@ -441,24 +417,9 @@ export function translateStream(upstreamBody: NodeJS.ReadableStream, model: stri
     output.push(null);
   }
 
-  const decoder = new TextDecoder();
-  upstreamBody.on('data', (chunk: Buffer) => {
-    buffer += decoder.decode(chunk, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      if (line.trim()) processLine(line);
-    }
-  });
-
-  upstreamBody.on('end', () => {
-    if (buffer.trim()) processLine(buffer);
-    finish();
-  });
-
-  upstreamBody.on('error', () => {
-    finish();
-  });
+  attachSseLineReader(upstreamBody, (line) => {
+    if (line.trim()) processLine(line);
+  }, finish);
 
   return output;
 }
@@ -536,6 +497,13 @@ function sendAnthropicAsSSE(res: ServerResponse, anthropicResponse: any) {
         type: 'content_block_delta', index: i,
         delta: { type: 'thinking_delta', thinking: block.thinking ?? '' },
       }));
+      res.write(sseChunk('content_block_delta', {
+        type: 'content_block_delta', index: i,
+        delta: {
+          type: 'signature_delta',
+          signature: block.signature || GEMINI_SKIP_THOUGHT_SIGNATURE,
+        },
+      }));
     } else if (block.type === 'tool_use') {
       res.write(sseChunk('content_block_start', {
         type: 'content_block_start', index: i,
@@ -564,17 +532,12 @@ export interface ProxyHandle {
   close: () => void;
 }
 
-function contextWindowForModel(id: string): number {
-  const lower = id.toLowerCase();
-  if (lower.includes('gemini-2.5-pro') || lower.includes('gemini-1.5-pro')) return 2_000_000;
-  if (lower.includes('gemini')) return 1_000_000;
-  if (lower.includes('claude-3-5') || lower.includes('claude-3.5')) return 200_000;
-  if (lower.includes('claude')) return 200_000;
-  if (lower.includes('gpt-4')) return 128_000;
-  return 200_000;
-}
-
-export function startProxy(completionsUrl: string, modelId: string, debug = false): Promise<ProxyHandle> {
+export function startProxy(
+  completionsUrl: string,
+  modelId: string,
+  debug = false,
+  contextWindow?: number,
+): Promise<ProxyHandle> {
   const upstreamUrl = completionsUrl;
   const LOG = '/tmp/opencode-proxy-debug.log';
   const plog = debug
@@ -583,16 +546,14 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
 
   // Synthetic Anthropic-format models response so Claude Code can validate the model
   // and display the correct context window in the status bar.
+  const modelEntry = formatAnthropicModelEntry(modelId, modelId, contextWindow);
   const modelsResponse = JSON.stringify({
-    data: [{
-      id: modelId, type: 'model', display_name: modelId,
-      created_at: '2025-01-01T00:00:00Z',
-      context_window: contextWindowForModel(modelId),
-    }],
+    data: [modelEntry],
     has_more: false,
     first_id: modelId,
     last_id: modelId,
   });
+  const singleModelResponse = JSON.stringify(modelEntry);
 
   const server = createServer(async (req, res) => {
     plog(`${req.method} ${req.url}`);
@@ -606,8 +567,9 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
 
     // GET /v1/models — Claude Code validates the model on startup
     if (req.method === 'GET' && req.url?.startsWith('/v1/models')) {
+      const modelPathMatch = req.url.match(/^\/v1\/models\/([^?]+)/);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(modelsResponse);
+      res.end(modelPathMatch ? singleModelResponse : modelsResponse);
       return;
     }
 
@@ -639,7 +601,11 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
       if (isGeminiUrl(upstreamUrl)) {
         const nativeUrl = geminiNativeUrl(originalModel, clientWantsStream);
         const geminiBody = translateToGemini(anthropicBody);
-        plog(`gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${geminiBody.tools?.[0]?.functionDeclarations?.length ?? 0}, msgs=${geminiBody.contents?.length ?? 0}`);
+        const geminiTools = geminiBody.tools as Array<{ functionDeclarations?: unknown[] }> | undefined;
+        const geminiContents = geminiBody.contents as unknown[] | undefined;
+        const totalTools = anthropicBody.tools?.length ?? 0;
+        const upstreamCount = geminiTools?.[0]?.functionDeclarations?.length ?? 0;
+        plog(`gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${upstreamCount}/${totalTools}, msgs=${geminiContents?.length ?? 0}`);
 
         let upstreamRes: Response;
         try {
@@ -691,7 +657,10 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
 
       // ── OpenAI-compatible path ──────────────────────────────────────
       const openaiBody = translateRequest(anthropicBody);
-      plog(`openai: tools=${openaiBody.tools?.length ?? 0}, stream=${openaiBody.stream ?? false}, msgs=${openaiBody.messages?.length ?? 0}`);
+      const openaiTools = openaiBody.tools as unknown[] | undefined;
+      const openaiMessages = openaiBody.messages as unknown[] | undefined;
+      const totalTools = anthropicBody.tools?.length ?? 0;
+      plog(`openai: tools=${openaiTools?.length ?? 0}/${totalTools}, stream=${openaiBody.stream ?? false}, msgs=${openaiMessages?.length ?? 0}`);
 
       let upstreamRes: Response;
       try {

@@ -25,6 +25,7 @@ export interface ModelInfo {
   sourceBackend: 'zen' | 'go';
   modelFormat: ModelFormat;
   cost?: ModelCost;
+  contextWindow?: number;
 }
 
 export interface LocalProviderModel {
@@ -36,6 +37,7 @@ export interface LocalProviderModel {
   baseUrl?: string;        // set for anthropic-format models
   completionsUrl?: string; // set for openai-format models
   cost?: ModelCost;
+  contextWindow?: number;
 }
 
 export interface LocalProvider {

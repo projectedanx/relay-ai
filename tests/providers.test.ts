@@ -80,6 +80,22 @@ describe('resolveEndpoint', () => {
     });
   });
 
+  it('returns openai format for @openrouter/ai-sdk-provider', () => {
+    const result = resolveEndpoint('@openrouter/ai-sdk-provider', 'https://openrouter.ai/api/v1');
+    expect(result).toEqual({
+      format: 'openai',
+      completionsUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    });
+  });
+
+  it('defaults OpenRouter URL when apiUrl is empty', () => {
+    const result = resolveEndpoint('@openrouter/ai-sdk-provider', '');
+    expect(result).toEqual({
+      format: 'openai',
+      completionsUrl: 'https://openrouter.ai/api/v1/chat/completions',
+    });
+  });
+
   it('returns null for unknown npm packages', () => {
     expect(resolveEndpoint('@ai-sdk/unknown-provider', '')).toBeNull();
     expect(resolveEndpoint('', '')).toBeNull();
@@ -207,6 +223,31 @@ describe('normalizeProviders', () => {
     expect(model.modelFormat).toBe('openai');
     expect(model.completionsUrl).toBe('https://api.openai.com/v1/chat/completions');
     expect(model.brand).toBe('GPT');
+  });
+
+  it('normalizes OpenRouter provider models', () => {
+    const result = normalizeProviders([
+      {
+        id: 'openrouter',
+        name: 'OpenRouter',
+        key: 'sk-or-test',
+        models: {
+          m: {
+            id: 'anthropic/claude-sonnet-4',
+            name: 'Claude Sonnet 4',
+            family: 'claude-sonnet',
+            api: { npm: '@openrouter/ai-sdk-provider', url: 'https://openrouter.ai/api/v1' },
+            limit: { context: 200000 },
+          },
+        },
+      },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('openrouter');
+    const model = result[0].models[0];
+    expect(model.modelFormat).toBe('openai');
+    expect(model.completionsUrl).toBe('https://openrouter.ai/api/v1/chat/completions');
+    expect(model.contextWindow).toBe(200000);
   });
 
   it('uses model.id as name when name is missing', () => {

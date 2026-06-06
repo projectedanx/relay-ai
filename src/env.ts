@@ -1,5 +1,6 @@
 // src/env.ts
 import { CONFLICTING_ENV_VARS } from './constants.js';
+import { resolveContextWindow } from './context-window.js';
 import type { ConflictInfo } from './types.js';
 
 export function detectConflicts(): ConflictInfo[] {
@@ -15,11 +16,23 @@ export function resolveApiKey(): string | null {
   return key?.trim() || null;
 }
 
+/** Restore first-party-like Claude Code behavior when routing through a proxy or gateway. */
+export function applyClaudeCodeThirdPartyCompat(env: NodeJS.ProcessEnv): void {
+  // Custom ANTHROPIC_BASE_URL disables MCP tool search by default, loading every
+  // MCP tool (100+) on every turn. Requires defer_loading on tools — do not set
+  // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS when using the local translation proxy.
+  env['ENABLE_TOOL_SEARCH'] = 'true';
+  // Third-party routes may enable a shorter system prompt that drops conversational
+  // guardrails while hooks/plugins still inject agentic instructions.
+  env['CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT'] = '0';
+}
+
 export function buildChildEnv(
   baseUrl: string,
   model: string,
   apiKey: string,
   proxyPort?: number,
+  contextWindow?: number,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
@@ -30,6 +43,9 @@ export function buildChildEnv(
     : baseUrl;
   env['ANTHROPIC_API_KEY'] = apiKey;
   env['ANTHROPIC_MODEL'] = model;
+  // Claude Code defaults to 200K for non-api.anthropic.com base URLs; override when we know better.
+  env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = String(resolveContextWindow(model, contextWindow));
+  applyClaudeCodeThirdPartyCompat(env);
   return env;
 }
 
