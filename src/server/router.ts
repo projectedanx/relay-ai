@@ -76,7 +76,7 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     }
 
     if (req.method === 'GET' && pathname === '/models') {
-      sendJson(res, 200, { models: options.catalog.list() });
+      sendJson(res, 200, { models: options.catalog.list().map(({ apiKey: _apiKey, ...rest }) => rest) });
       return;
     }
 
