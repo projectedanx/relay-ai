@@ -48,6 +48,7 @@ const GEMINI_UNSUPPORTED_SCHEMA_KEYS = new Set([
   'allOf', 'anyOf', 'oneOf', 'not',
   'if', 'then', 'else',
   'examples', 'default', 'const',
+  'exclusiveMinimum', 'exclusiveMaximum',
   'contentEncoding', 'contentMediaType',
 ]);
 

@@ -323,6 +323,8 @@ var GEMINI_UNSUPPORTED_SCHEMA_KEYS = /* @__PURE__ */ new Set([
   "examples",
   "default",
   "const",
+  "exclusiveMinimum",
+  "exclusiveMaximum",
   "contentEncoding",
   "contentMediaType"
 ]);
