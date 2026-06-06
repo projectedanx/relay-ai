@@ -494,6 +494,70 @@ function anthropicError(res: ServerResponse, status: number, message: string) {
   });
 }
 
+// Emit a fully-translated Anthropic response as SSE events.
+// Used when we made a non-streaming upstream request but Claude Code expects streaming.
+function sendAnthropicAsSSE(res: ServerResponse, anthropicResponse: any) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+
+  res.write(sseChunk('message_start', {
+    type: 'message_start',
+    message: {
+      id: anthropicResponse.id, type: 'message', role: 'assistant',
+      content: [], model: anthropicResponse.model,
+      stop_reason: null, stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  }));
+
+  const blocks: any[] = anthropicResponse.content ?? [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+
+    if (block.type === 'text') {
+      res.write(sseChunk('content_block_start', {
+        type: 'content_block_start', index: i,
+        content_block: { type: 'text', text: '' },
+      }));
+      res.write(sseChunk('content_block_delta', {
+        type: 'content_block_delta', index: i,
+        delta: { type: 'text_delta', text: block.text },
+      }));
+    } else if (block.type === 'thinking') {
+      res.write(sseChunk('content_block_start', {
+        type: 'content_block_start', index: i,
+        content_block: { type: 'thinking', thinking: '', signature: '' },
+      }));
+      res.write(sseChunk('content_block_delta', {
+        type: 'content_block_delta', index: i,
+        delta: { type: 'thinking_delta', thinking: block.thinking ?? '' },
+      }));
+    } else if (block.type === 'tool_use') {
+      res.write(sseChunk('content_block_start', {
+        type: 'content_block_start', index: i,
+        content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+      }));
+      res.write(sseChunk('content_block_delta', {
+        type: 'content_block_delta', index: i,
+        delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input ?? {}) },
+      }));
+    }
+
+    res.write(sseChunk('content_block_stop', { type: 'content_block_stop', index: i }));
+  }
+
+  res.write(sseChunk('message_delta', {
+    type: 'message_delta',
+    delta: { stop_reason: anthropicResponse.stop_reason, stop_sequence: null },
+    usage: anthropicResponse.usage ?? { input_tokens: 0, output_tokens: 0 },
+  }));
+  res.write(sseChunk('message_stop', { type: 'message_stop' }));
+  res.end();
+}
+
 export interface ProxyHandle {
   port: number;
   close: () => void;
@@ -552,6 +616,19 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
       const originalModel = anthropicBody.model;
       const openaiBody = translateRequest(anthropicBody);
 
+      // When the request includes tools, force non-streaming upstream so that
+      // thought_signature is present in the response (Gemini's streaming endpoint
+      // omits thought_signature from tool_call deltas). If Claude Code wanted
+      // streaming, we fake-stream the translated response back after the fact.
+      const hasTools = Array.isArray(openaiBody.tools) && openaiBody.tools.length > 0;
+      const clientWantsStream = Boolean(openaiBody.stream);
+      if (hasTools && clientWantsStream) {
+        delete openaiBody.stream;
+        delete openaiBody.stream_options;
+      }
+
+      plog(`upstream request: stream=${openaiBody.stream ?? false}, tools=${hasTools}`);
+
       let upstreamRes: Response;
       try {
         upstreamRes = await fetch(upstreamUrl, {
@@ -578,7 +655,7 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
         return;
       }
 
-      // Streaming response
+      // True streaming response (no tools — thought_signature not needed)
       if (openaiBody.stream && upstreamRes.body) {
         res.writeHead(200, {
           'Content-Type': 'text/event-stream',
@@ -591,10 +668,15 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
         return;
       }
 
-      // Non-streaming response
+      // Non-streaming response (either client didn't want streaming, or we forced
+      // non-streaming for tools to capture thought_signature reliably)
       const openaiData = await upstreamRes.json();
       const anthropicResponse = translateResponse(openaiData, originalModel);
-      sendJson(res, 200, anthropicResponse);
+      if (clientWantsStream) {
+        sendAnthropicAsSSE(res, anthropicResponse);
+      } else {
+        sendJson(res, 200, anthropicResponse);
+      }
       return;
     }
 
