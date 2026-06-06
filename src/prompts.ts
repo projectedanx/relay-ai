@@ -66,17 +66,6 @@ export async function pickLocalModel(
   conflicts: ConflictInfo[],
   prefs: UserPreferences,
 ): Promise<LocalProviderModel | null> {
-  // Group models by brand and sort within each brand by id
-  const brandMap = new Map<string, LocalProviderModel[]>();
-  for (const model of provider.models) {
-    const group = brandMap.get(model.brand) ?? [];
-    group.push(model);
-    brandMap.set(model.brand, group);
-  }
-  for (const group of brandMap.values()) {
-    group.sort((a, b) => a.id.localeCompare(b.id));
-  }
-
   let filteredModels: LocalProviderModel[];
 
   if (provider.models.length > 10) {

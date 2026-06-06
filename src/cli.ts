@@ -5,7 +5,7 @@ import { appendFileSync, readFileSync, existsSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { findClaudeBinary, launchClaude } from './launch.js';
 import { resolveApiKey, detectConflicts, buildChildEnv, readFromCredentialStore, saveToCredentialStore, isSecretServiceAvailable } from './env.js';
 import { getModels } from './models.js';
@@ -161,6 +161,21 @@ ${pc.bold('Behavior:')}
 
 function printHelp(text: string): void {
   console.log(`\n${text}\n`);
+}
+
+function printTraceLog(debugLogPath: string): void {
+  if (!existsSync(debugLogPath)) return;
+  const log = readFileSync(debugLogPath, 'utf8');
+  const errorLines = log.split('\n').filter(l =>
+    l.includes('error') || l.includes('Error') || l.includes('"type":"error"') || l.includes('status')
+  );
+  console.log('\n' + pc.bold(pc.cyan('── Debug trace ──')));
+  if (errorLines.length > 0) {
+    errorLines.slice(0, 30).forEach(l => console.log(pc.dim(l)));
+  } else {
+    console.log(pc.dim('(no errors found in debug log)'));
+  }
+  console.log(pc.dim(`Full log: ${debugLogPath}`));
 }
 
 function printDryRun(
@@ -397,7 +412,8 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
     }
   } else if (saveChoice === 'setx') {
     try {
-      execSync(`setx OPENCODE_API_KEY "${trimmedKey}"`, { stdio: ['pipe', 'pipe', 'pipe'] });
+      const result = spawnSync('setx', ['OPENCODE_API_KEY', trimmedKey], { stdio: ['pipe', 'pipe', 'pipe'] });
+      if (result.status !== 0) throw new Error('setx exited with non-zero status');
       p.log.success('Key saved as a user environment variable — active now and in all future terminals.');
     } catch {
       p.log.warn('Could not run setx — key will be used for this session only');
@@ -411,7 +427,8 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
   } else if (saveChoice === 'profile') {
     try {
       if (!existsSync(path)) appendFileSync(path, '');
-      appendFileSync(path, `\nexport OPENCODE_API_KEY="${trimmedKey}"\n`);
+      const escapedKey = trimmedKey.replace(/'/g, "'\\''");
+      appendFileSync(path, `\nexport OPENCODE_API_KEY='${escapedKey}'\n`);
       p.log.success(`Key saved to ${display} — active now and in all future terminals.`);
     } catch {
       p.log.warn(`Could not write to ${display} — key will be used for this session only`);
@@ -539,19 +556,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     const exitCode = await launchClaude(childEnv, selectedModel.id, [...traceArgs, ...claudeArgs]);
     proxyHandle?.close();
 
-    if (trace && existsSync(debugLogPath)) {
-      const log = readFileSync(debugLogPath, 'utf8');
-      const errorLines = log.split('\n').filter(l =>
-        l.includes('error') || l.includes('Error') || l.includes('"type":"error"') || l.includes('status')
-      );
-      console.log('\n' + pc.bold(pc.cyan('── Debug trace ──')));
-      if (errorLines.length > 0) {
-        errorLines.slice(0, 30).forEach(l => console.log(pc.dim(l)));
-      } else {
-        console.log(pc.dim('(no errors found in debug log)'));
-      }
-      console.log(pc.dim(`Full log: ${debugLogPath}`));
-    }
+    if (trace) printTraceLog(debugLogPath);
 
     return exitCode;
   }
@@ -658,19 +663,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     proxyHandle.close();
   }
 
-  if (trace && existsSync(debugLogPath)) {
-    const log = readFileSync(debugLogPath, 'utf8');
-    const errorLines = log.split('\n').filter(l =>
-      l.includes('error') || l.includes('Error') || l.includes('"type":"error"') || l.includes('status')
-    );
-    console.log('\n' + pc.bold(pc.cyan('── Debug trace ──')));
-    if (errorLines.length > 0) {
-      errorLines.slice(0, 30).forEach(l => console.log(pc.dim(l)));
-    } else {
-      console.log(pc.dim('(no errors found in debug log)'));
-    }
-    console.log(pc.dim(`Full log: ${debugLogPath}`));
-  }
+  if (trace) printTraceLog(debugLogPath);
 
   return exitCode;
 }

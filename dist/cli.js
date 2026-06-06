@@ -7,7 +7,7 @@ import { appendFileSync as appendFileSync2, readFileSync as readFileSync3, exist
 import { homedir as homedir5, tmpdir } from "os";
 import { join as join5 } from "path";
 import { fileURLToPath } from "url";
-import { execSync as execSync3 } from "child_process";
+import { spawnSync } from "child_process";
 
 // src/launch.ts
 import { execSync, spawn } from "child_process";
@@ -1343,15 +1343,6 @@ async function askSubscriptionTier() {
   return tier;
 }
 async function pickLocalModel(provider, conflicts, prefs) {
-  const brandMap = /* @__PURE__ */ new Map();
-  for (const model of provider.models) {
-    const group = brandMap.get(model.brand) ?? [];
-    group.push(model);
-    brandMap.set(model.brand, group);
-  }
-  for (const group of brandMap.values()) {
-    group.sort((a, b) => a.id.localeCompare(b.id));
-  }
   let filteredModels;
   if (provider.models.length > 10) {
     const filterInput = await p3.text({
@@ -1801,6 +1792,20 @@ function printHelp(text3) {
 ${text3}
 `);
 }
+function printTraceLog(debugLogPath) {
+  if (!existsSync4(debugLogPath)) return;
+  const log4 = readFileSync3(debugLogPath, "utf8");
+  const errorLines = log4.split("\n").filter(
+    (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
+  );
+  console.log("\n" + pc3.bold(pc3.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
+  if (errorLines.length > 0) {
+    errorLines.slice(0, 30).forEach((l) => console.log(pc3.dim(l)));
+  } else {
+    console.log(pc3.dim("(no errors found in debug log)"));
+  }
+  console.log(pc3.dim(`Full log: ${debugLogPath}`));
+}
 function printDryRun(backendName, modelId, baseUrl, modelFormat, claudeArgs, conflicts, disableExperimentalBetas) {
   console.log("");
   console.log(pc3.bold(pc3.cyan("  DRY RUN \u2014 would execute:")));
@@ -2009,7 +2014,8 @@ ${autoLoadLine}
     }
   } else if (saveChoice === "setx") {
     try {
-      execSync3(`setx OPENCODE_API_KEY "${trimmedKey}"`, { stdio: ["pipe", "pipe", "pipe"] });
+      const result = spawnSync("setx", ["OPENCODE_API_KEY", trimmedKey], { stdio: ["pipe", "pipe", "pipe"] });
+      if (result.status !== 0) throw new Error("setx exited with non-zero status");
       p4.log.success("Key saved as a user environment variable \u2014 active now and in all future terminals.");
     } catch {
       p4.log.warn("Could not run setx \u2014 key will be used for this session only");
@@ -2023,8 +2029,9 @@ ${autoLoadLine}
   } else if (saveChoice === "profile") {
     try {
       if (!existsSync4(path)) appendFileSync2(path, "");
+      const escapedKey = trimmedKey.replace(/'/g, "'\\''");
       appendFileSync2(path, `
-export OPENCODE_API_KEY="${trimmedKey}"
+export OPENCODE_API_KEY='${escapedKey}'
 `);
       p4.log.success(`Key saved to ${display} \u2014 active now and in all future terminals.`);
     } catch {
@@ -2119,19 +2126,7 @@ async function runClaudeCommand(parsed) {
     }
     const exitCode2 = await launchClaude(childEnv2, selectedModel.id, [...traceArgs2, ...claudeArgs]);
     proxyHandle2?.close();
-    if (trace && existsSync4(debugLogPath2)) {
-      const log4 = readFileSync3(debugLogPath2, "utf8");
-      const errorLines = log4.split("\n").filter(
-        (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
-      );
-      console.log("\n" + pc3.bold(pc3.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
-      if (errorLines.length > 0) {
-        errorLines.slice(0, 30).forEach((l) => console.log(pc3.dim(l)));
-      } else {
-        console.log(pc3.dim("(no errors found in debug log)"));
-      }
-      console.log(pc3.dim(`Full log: ${debugLogPath2}`));
-    }
+    if (trace) printTraceLog(debugLogPath2);
     return exitCode2;
   }
   const apiKey = await resolveOrCollectApiKey(dryRun);
@@ -2208,19 +2203,7 @@ async function runClaudeCommand(parsed) {
   if (proxyHandle) {
     proxyHandle.close();
   }
-  if (trace && existsSync4(debugLogPath)) {
-    const log4 = readFileSync3(debugLogPath, "utf8");
-    const errorLines = log4.split("\n").filter(
-      (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
-    );
-    console.log("\n" + pc3.bold(pc3.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
-    if (errorLines.length > 0) {
-      errorLines.slice(0, 30).forEach((l) => console.log(pc3.dim(l)));
-    } else {
-      console.log(pc3.dim("(no errors found in debug log)"));
-    }
-    console.log(pc3.dim(`Full log: ${debugLogPath}`));
-  }
+  if (trace) printTraceLog(debugLogPath);
   return exitCode;
 }
 async function main(args = process.argv.slice(2)) {
