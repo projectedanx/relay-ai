@@ -72,4 +72,4 @@ export function classifyModelFormat(
   return 'openai';
 }
 
-export const VERSION = '0.2.5';
+export const VERSION = '0.3.0';
