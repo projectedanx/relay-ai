@@ -64,6 +64,13 @@ function sanitizeSchema(schema: any): any {
     if (!GEMINI_SCHEMA_ALLOWED_KEYS.has(k)) continue;
     out[k] = sanitizeSchema(v);
   }
+  // After stripping unsupported fields some properties may have been removed entirely.
+  // Filter required[] to only reference properties that still exist — Gemini rejects
+  // required entries with no matching property.
+  if (out.required && out.properties) {
+    out.required = (out.required as string[]).filter((name: string) => name in out.properties);
+    if (out.required.length === 0) delete out.required;
+  }
   return out;
 }
 

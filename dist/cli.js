@@ -332,6 +332,10 @@ function sanitizeSchema(schema) {
     if (!GEMINI_SCHEMA_ALLOWED_KEYS.has(k)) continue;
     out[k] = sanitizeSchema(v);
   }
+  if (out.required && out.properties) {
+    out.required = out.required.filter((name) => name in out.properties);
+    if (out.required.length === 0) delete out.required;
+  }
   return out;
 }
 function translateToGemini(body) {
