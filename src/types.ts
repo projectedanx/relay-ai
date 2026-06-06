@@ -27,9 +27,28 @@ export interface ModelInfo {
   cost?: ModelCost;
 }
 
+export interface LocalProviderModel {
+  id: string;
+  name: string;
+  family: string;
+  brand: string;
+  modelFormat: 'anthropic' | 'openai';
+  baseUrl?: string;        // set for anthropic-format models
+  completionsUrl?: string; // set for openai-format models
+  cost?: ModelCost;
+}
+
+export interface LocalProvider {
+  id: string;
+  name: string;
+  apiKey: string;
+  models: LocalProviderModel[];
+}
+
 export interface UserPreferences {
   lastBackend?: 'zen' | 'go';
   lastModel?: string;
+  lastProvider?: string;
   subscriptionTier?: 'free' | 'zen' | 'go' | 'both';
   server?: {
     savedPassword?: string;
