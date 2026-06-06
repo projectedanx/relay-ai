@@ -627,7 +627,13 @@ export function startProxy(completionsUrl: string, modelId: string, debug = fals
         delete openaiBody.stream_options;
       }
 
-      plog(`request: tools=${hasTools ? openaiBody.tools.length : 0}, stream=${openaiBody.stream ?? false}, msgs=${openaiBody.messages?.length ?? 0}`);
+      // Gemini's OpenAI-compatible endpoint strips thought_signature from responses
+      // but still requires it on echo-back. Disabling thinking avoids the requirement.
+      if (upstreamUrl.includes('generativelanguage.googleapis.com')) {
+        openaiBody.thinking = { thinking_budget: 0 };
+      }
+
+      plog(`request: tools=${hasTools ? openaiBody.tools.length : 0}, stream=${openaiBody.stream ?? false}, msgs=${openaiBody.messages?.length ?? 0}, thinking_disabled=${Boolean(openaiBody.thinking)}`);
 
       let upstreamRes: Response;
       try {
