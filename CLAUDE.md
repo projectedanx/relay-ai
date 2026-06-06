@@ -90,7 +90,21 @@ Save options per platform:
 
 In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is active for the current session regardless of save choice.
 
-**Local provider discovery** (`src/providers.ts`): `fetchLocalProviders()` spawns `opencode serve --port 0`, waits for the listening URL in stdout/stderr, fetches `GET /config/providers`, then kills the process. `normalizeProviders()` (called internally) skips OAuth providers (empty key), skips `opencode`/`opencode-go` (cloud backends handled separately), and classifies each model's format and upstream URL from its `api.npm` package. Known first-party packages (`@ai-sdk/anthropic|openai|google|groq|mistral|xai`) have hardcoded URLs; `@ai-sdk/openai-compatible` providers use the `api.url` from the config. Models with unknown packages are dropped. Google/Gemini is routed via `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` (Google's OpenAI-compatible endpoint). Cost display in Claude Code is inaccurate for non-Anthropic models (Claude Code applies its own pricing table); documented limitation.
+**Local provider discovery** (`src/providers.ts`): `fetchLocalProviders()` spawns `opencode serve --port 0`, waits for the listening URL in stdout/stderr (10s timeout, spinner shown in CLI), fetches `GET /config/providers`, then kills the process. `normalizeProviders()` (called internally) skips OAuth providers (empty key), skips `opencode`/`opencode-go` (cloud backends handled separately), and classifies each model's format and upstream URL from its `api.npm` package. Known first-party packages (`@ai-sdk/anthropic|openai|google|groq|mistral|xai`) have hardcoded URLs; `@ai-sdk/openai-compatible` providers use the `api.url` from the config. Models with unknown packages are dropped. Google/Gemini is routed via `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` (Google's OpenAI-compatible endpoint). Cost display in Claude Code is inaccurate for non-Anthropic models (Claude Code applies its own pricing table); documented limitation.
+
+**Local provider routing:** Two paths depending on `model.modelFormat`:
+- `'anthropic'`: `buildChildEnv(model.baseUrl, model.id, provider.apiKey)` — no proxy, Claude Code talks directly to the provider's Anthropic-compatible endpoint. The `baseUrl` must NOT include `/v1` (the Anthropic SDK appends it).
+- `'openai'`: `startProxy(model.completionsUrl, model.id, trace)` — proxy started on a random local port; `buildChildEnv('http://127.0.0.1', model.id, provider.apiKey, proxyPort)`. The `completionsUrl` is the full endpoint including path (e.g. `https://api.groq.com/openai/v1/chat/completions`).
+
+**Providers that need a non-empty API key:** `normalizeProviders` skips any provider with an empty `key` field (to filter OAuth-only providers like OpenAI/xAI configured via browser login). Local providers that don't validate keys (e.g. Ollama) must still have a non-empty placeholder key set in OpenCode (e.g. `"ollama"`).
+
+**Server command local providers** (`src/server/index.ts`): After loading Zen/Go models, `loadServerModels()` also calls `fetchLocalProviders()` and appends each `LocalProviderModel` as a `ServerModelInfo` with `baseUrl`/`completionsUrl`/`apiKey` routing fields set. The router (`src/server/router.ts`) prefers these per-model fields when present. The `GET /models` endpoint strips `apiKey` from the serialized output to prevent key exposure. Spinner message shows `"N models (M from local providers)"`.
+
+**Proxy translation fixes (v0.3.0):**
+- `prompt_cache_key` removed from `translateRequest` output — it's a non-standard field rejected by Google, Groq, Mistral, and most providers.
+- `thought_signature` round-trip: Google's Gemini thinking models attach a `thought_signature` to tool calls that must be echoed back in subsequent requests. The proxy encodes it into the Anthropic `tool_use.id` as `{id}::ts::{signature}` so Claude Code preserves it, then decodes it in `translateRequest` to re-inject onto the outgoing `tool_calls` entry. The `tool_call_id` in tool results is also stripped of the suffix. This is invisible to Claude Code.
+- Server `handleAnthropicMessages` now supports streaming for openai-format models (checks `body.stream`, pipes through `translateStream` when true).
+- Shell injection in API key save paths hardened: macOS profile uses POSIX single-quote escaping; Windows `setx` uses `spawnSync` with argument array.
 
 **Stale free models:** `STALE_FREE_MODELS` in `constants.ts` contains models whose free promotion ended but the API still returns them. Currently only `qwen3.6-plus-free`. These are filtered out in `mergeModels()`.
 
@@ -101,3 +115,24 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `settings.json` is never touched. All Claude Code configuration is env-var-only, passed to the child process. This avoids the backup/restore problem that `ollama launch claude` has.
 - `--dry-run` ignores all saved state (env key, Keychain, tier, preferences) and skips all writes. Used to simulate a fresh first-run experience.
 - When adding a new backend, update `BACKENDS` in `constants.ts`, the `BackendConfig` id union in `types.ts`, and the subscription tier logic in `prompts.ts` and `cli.ts`.
+- `buildChildEnv(baseUrl: string, model, apiKey, proxyPort?)` — takes a plain string URL, not a `BackendConfig`. When `proxyPort` is set, `ANTHROPIC_BASE_URL` is always `http://127.0.0.1:{proxyPort}` regardless of `baseUrl`.
+- `startProxy(completionsUrl: string, modelId, debug)` — takes the full chat completions URL including path. Callers must append `/v1/chat/completions` themselves (e.g. `${backend.baseUrl}/v1/chat/completions` for Zen/Go).
+
+## In-progress work (branch: feature/local-providers)
+
+**Status:** Implementation complete. Version bumped to 0.3.0 and installed globally for manual testing.
+
+**What was tested:**
+- Gemini 2.5 Flash via Google's OpenAI-compatible endpoint — text responses work, tool calls work (after `thought_signature` fix).
+- The `prompt_cache_key` field was causing Google 400 errors and has been removed.
+
+**Pending before merge:**
+- Broader manual testing of other local providers (Groq, Mistral, xAI, Anthropic-direct, Ollama via `@ai-sdk/openai-compatible`).
+- Ollama note: must set a non-empty placeholder key in OpenCode config (Ollama ignores the auth header).
+- PR creation and review.
+
+**Known limitations (by design):**
+- Cost display in Claude Code is always inaccurate for non-Anthropic models.
+- OAuth-authenticated providers (no stored key) are silently skipped.
+- Providers with custom auth mechanisms (e.g. Azure OpenAI with deployment URLs) are not supported.
+- The `thought_signature` encoding (`::ts::` separator in tool_use ids) is a workaround; if Google ever changes the signature format to include `::ts::` literally, it would break. Unlikely but worth knowing.
