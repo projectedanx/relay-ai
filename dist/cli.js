@@ -933,6 +933,7 @@ function resolveEndpoint(npm, apiUrl) {
         baseUrl: (apiUrl || "https://api.anthropic.com").replace(/\/v1\/?$/, "")
       };
     case "@ai-sdk/openai-compatible":
+      if (!apiUrl) return null;
       return {
         format: "openai",
         completionsUrl: apiUrl.replace(/\/$/, "") + "/chat/completions"
@@ -1168,6 +1169,7 @@ function extractBearerToken(value) {
 }
 
 // src/server/router.ts
+import { Readable as Readable2 } from "stream";
 async function startServer(options) {
   const server = createServer2((req, res) => {
     void routeRequest(req, res, options);
@@ -1205,7 +1207,7 @@ async function routeRequest(req, res, options) {
       return;
     }
     if (req.method === "GET" && pathname === "/models") {
-      sendJson2(res, 200, { models: options.catalog.list() });
+      sendJson2(res, 200, { models: options.catalog.list().map(({ apiKey: _apiKey, ...rest }) => rest) });
       return;
     }
     if (req.method === "GET" && pathname === "/anthropic/v1/models") {
@@ -1246,8 +1248,35 @@ async function handleAnthropicMessages(req, res, options) {
   if (model.modelFormat === "openai") {
     const completionsUrl = model.completionsUrl ? model.completionsUrl : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
     const apiKey = model.apiKey ?? options.apiKey;
-    const upstreamJson = await postJson(completionsUrl, translateRequest(body), apiKey);
-    sendJson2(res, upstreamJson.status, translateResponse(upstreamJson.body, body.model));
+    const openaiBody = translateRequest(body);
+    const upstreamRes = await fetch(completionsUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+        "X-API-Key": apiKey
+      },
+      body: JSON.stringify(openaiBody)
+    });
+    if (!upstreamRes.ok) {
+      const errText = await upstreamRes.text();
+      res.writeHead(upstreamRes.status, { "Content-Type": upstreamRes.headers.get("content-type") || "application/json" });
+      res.end(errText);
+      return;
+    }
+    if (openaiBody.stream && upstreamRes.body) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      });
+      const nodeStream = Readable2.fromWeb(upstreamRes.body);
+      const translated = translateStream(nodeStream, body.model);
+      translated.pipe(res);
+      return;
+    }
+    const openaiData = await upstreamRes.json();
+    sendJson2(res, 200, translateResponse(openaiData, body.model));
     return;
   }
   sendJson2(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
@@ -1417,10 +1446,10 @@ async function loadServerModels(tier) {
         }
       }
     } else {
-      p2.log.warn("Local OpenCode not found \u2014 showing cloud models only");
+      p2.log.info("No local providers found \u2014 using cloud models only");
     }
   } catch {
-    p2.log.warn("Local OpenCode not found \u2014 showing cloud models only");
+    p2.log.info("No local providers found \u2014 using cloud models only");
   }
   return models;
 }
@@ -2087,7 +2116,10 @@ async function runClaudeCommand(parsed) {
   const prefs = dryRun ? {} : loadPreferences();
   const conflicts = detectConflicts();
   p4.intro(pc3.bold("  OpenCode Starter"));
+  const providerSpinner = p4.spinner();
+  providerSpinner.start("Checking for local providers...");
   const localProviders = await fetchLocalProviders();
+  providerSpinner.stop("");
   if (localProviders === null) {
     p4.log.info(pc3.dim("Tip: Install OpenCode locally to unlock additional providers"));
   }

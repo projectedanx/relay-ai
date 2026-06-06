@@ -456,7 +456,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   p.intro(pc.bold('  OpenCode Starter'));
 
+  const providerSpinner = p.spinner();
+  providerSpinner.start('Checking for local providers...');
   const localProviders = await fetchLocalProviders();
+  providerSpinner.stop('');
 
   if (localProviders === null) {
     p.log.info(pc.dim('Tip: Install OpenCode locally to unlock additional providers'));

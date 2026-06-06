@@ -7,7 +7,8 @@ import {
   type ServerBackendId,
   type ServerModelInfo,
 } from './models.js';
-import { translateRequest, translateResponse } from '../proxy.js';
+import { Readable } from 'node:stream';
+import { translateRequest, translateResponse, translateStream } from '../proxy.js';
 
 export interface ServerBackend {
   baseUrl: string;
@@ -134,8 +135,39 @@ async function handleAnthropicMessages(
       ? model.completionsUrl
       : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
     const apiKey = model.apiKey ?? options.apiKey;
-    const upstreamJson = await postJson(completionsUrl, translateRequest(body), apiKey);
-    sendJson(res, upstreamJson.status, translateResponse(upstreamJson.body, body.model));
+    const openaiBody = translateRequest(body);
+
+    const upstreamRes = await fetch(completionsUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+        'X-API-Key': apiKey,
+      },
+      body: JSON.stringify(openaiBody),
+    });
+
+    if (!upstreamRes.ok) {
+      const errText = await upstreamRes.text();
+      res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
+      res.end(errText);
+      return;
+    }
+
+    if (openaiBody.stream && upstreamRes.body) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      const nodeStream = Readable.fromWeb(upstreamRes.body as any);
+      const translated = translateStream(nodeStream, body.model);
+      translated.pipe(res);
+      return;
+    }
+
+    const openaiData = await upstreamRes.json();
+    sendJson(res, 200, translateResponse(openaiData, body.model));
     return;
   }
 

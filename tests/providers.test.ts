@@ -28,6 +28,10 @@ describe('resolveEndpoint', () => {
     });
   });
 
+  it('returns null for @ai-sdk/openai-compatible with empty apiUrl', () => {
+    expect(resolveEndpoint('@ai-sdk/openai-compatible', '')).toBeNull();
+  });
+
   it('strips trailing slash before appending /chat/completions for @ai-sdk/openai-compatible', () => {
     const result = resolveEndpoint('@ai-sdk/openai-compatible', 'https://api.deepseek.com/');
     expect(result).toEqual({

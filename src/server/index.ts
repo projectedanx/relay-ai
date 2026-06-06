@@ -121,10 +121,10 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
         }
       }
     } else {
-      p.log.warn('Local OpenCode not found — showing cloud models only');
+      p.log.info('No local providers found — using cloud models only');
     }
   } catch {
-    p.log.warn('Local OpenCode not found — showing cloud models only');
+    p.log.info('No local providers found — using cloud models only');
   }
 
   return models;

@@ -65,6 +65,7 @@ export function resolveEndpoint(
         baseUrl: (apiUrl || 'https://api.anthropic.com').replace(/\/v1\/?$/, ''),
       };
     case '@ai-sdk/openai-compatible':
+      if (!apiUrl) return null;
       return {
         format: 'openai',
         completionsUrl: apiUrl.replace(/\/$/, '') + '/chat/completions',
