@@ -1,6 +1,6 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, main } from '../src/cli.js';
+import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, main } from '../src/cli.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -102,6 +102,28 @@ describe('parseArgs', () => {
       error: 'Unknown server option: --port',
     });
   });
+
+  it('parses models command', () => {
+    expect(parseArgs(['models'])).toMatchObject({
+      command: 'models',
+      showHelp: false,
+      claudeArgs: [],
+    });
+  });
+
+  it('parses models help', () => {
+    expect(parseArgs(['models', '--help'])).toMatchObject({
+      command: 'models',
+      showHelp: true,
+    });
+  });
+
+  it('rejects unknown models options', () => {
+    expect(parseArgs(['models', '--filter', 'groq'])).toMatchObject({
+      command: 'models',
+      error: 'Unknown models option: --filter',
+    });
+  });
 });
 
 describe('help text', () => {
@@ -109,6 +131,7 @@ describe('help text', () => {
     const help = rootHelpText();
 
     expect(help).toContain('opencode-starter claude');
+    expect(help).toContain('models');
     expect(help).toContain('server');
     expect(help).toContain('Commands:');
     expect(help).toContain('codex');
@@ -132,6 +155,15 @@ describe('help text', () => {
     expect(help).toContain('local-only');
     expect(help).toContain('network');
     expect(help).toContain('saved only if');
+  });
+
+  it('models help explains favorites and /model behavior', () => {
+    const help = modelsHelpText();
+
+    expect(help).toContain('opencode-starter models');
+    expect(help).toContain('favorites');
+    expect(help).toContain('/model');
+    expect(help).toContain('10');
   });
 });
 

@@ -8,16 +8,24 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { findClaudeBinary, launchClaude } from './launch.js';
 import { resolveApiKey, detectConflicts, buildChildEnv, readFromCredentialStore, saveToCredentialStore, isSecretServiceAvailable } from './env.js';
-import { getModels } from './models.js';
-import { startProxy } from './proxy.js';
-import type { ProxyHandle } from './proxy.js';
+import { MAX_MODEL_CATALOG } from './constants.js';
+import { startProxy, startProxyCatalog } from './proxy.js';
+import type { ProxyHandle, ProxyRoute } from './proxy.js';
+import {
+  buildCatalogRoutes,
+  localModelToRoute,
+  makeRouteResolver,
+  zenGoModelToRoute,
+} from './catalog.js';
 import { runServerCommand } from './server/index.js';
 import type { ModelFormat } from './types.js';
-import { loadPreferences, savePreferences, getCachedModels, setCachedModels, getSubscriptionTier, setSubscriptionTier } from './config.js';
-import { runWizard, askSubscriptionTier, pickLocalModel } from './prompts.js';
+import { loadPreferences, savePreferences, getSubscriptionTier, setSubscriptionTier } from './config.js';
+import { runWizard, askSubscriptionTier, pickLocalModel, browseAllModels } from './prompts.js';
 import { fetchLocalProviders } from './providers.js';
+import { fetchProviderCatalog, fetchZenGoModels, providersForPicker } from './provider-catalog.js';
 import { BACKENDS, VERSION } from './constants.js';
-import type { ParsedArgs, ModelInfo } from './types.js';
+import type { ParsedArgs, ModelInfo, FavoriteModel } from './types.js';
+import { addFavorite, removeFavorite } from './favorites.js';
 
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--setup', '--trace', '--help', '-h', '--version', '-v']);
 
@@ -51,6 +59,16 @@ export function parseArgs(args: string[]): ParsedArgs {
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
       else if (!parsed.error) parsed.error = `Unknown server option: ${arg}`;
+    }
+    return parsed;
+  }
+
+  if (first === 'models') {
+    const parsed = emptyParsed('models');
+    for (const arg of rest) {
+      if (arg === '--help' || arg === '-h') parsed.showHelp = true;
+      else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
+      else if (!parsed.error) parsed.error = `Unknown models option: ${arg}`;
     }
     return parsed;
   }
@@ -97,6 +115,7 @@ ${pc.bold('Usage:')}
 
 ${pc.bold('Commands:')}
   claude      Launch Claude Code through OpenCode Starter
+  models      Manage your favorite models for mid-session switching
   server      Run a foreground OpenCode Starter API gateway
   codex       planned
 
@@ -159,8 +178,67 @@ ${pc.bold('Behavior:')}
   Server host and port are not saved.`;
 }
 
+export function modelsHelpText(): string {
+  return `${pc.bold('opencode-starter models')} v${VERSION}
+Manage your favorite models for mid-session switching.
+
+${pc.bold('Usage:')}
+  opencode-starter models
+  opencode-starter models --help
+  opencode-starter models --version
+
+${pc.bold('Behavior:')}
+  Opens an interactive manager to add or remove favorite models.
+  Favorites are saved to ~/.opencode-starter/config.json.
+  Capped at ${MAX_MODEL_CATALOG} favorites.
+
+${pc.bold('How it works:')}
+  When you have favorites set, running "opencode-starter claude" automatically
+  starts a multi-model proxy. Claude Code's /model command shows your favorites,
+  letting you switch models live without restarting.
+  With no favorites, launch behaves exactly as today (single model).`;
+}
+
 function printHelp(text: string): void {
   console.log(`\n${text}\n`);
+}
+
+async function launchClaudeViaCatalog(
+  catalogRoutes: ProxyRoute[],
+  startingRoute: ProxyRoute,
+  contextWindow: number | undefined,
+  trace: boolean,
+  claudeArgs: string[],
+): Promise<number> {
+  let proxyHandle: ProxyHandle;
+  try {
+    proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
+    p.log.info(
+      `Switch menu active — proxy on port ${proxyHandle.port} ` +
+      pc.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? 's' : ''} in /model)`),
+    );
+  } catch (err) {
+    p.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+
+  const childEnv = buildChildEnv(
+    `http://127.0.0.1:${proxyHandle.port}`,
+    startingRoute.aliasId,
+    'catalog-proxy',
+    proxyHandle.port,
+    contextWindow,
+    true,
+  );
+
+  const debugLogPath = join(tmpdir(), 'opencode-starter-debug.log');
+  const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
+  if (trace) p.log.info(`Debug log: ${debugLogPath}`);
+
+  const exitCode = await launchClaude(childEnv, startingRoute.aliasId, [...traceArgs, ...claudeArgs]);
+  proxyHandle.close();
+  if (trace) printTraceLog(debugLogPath);
+  return exitCode;
 }
 
 function printTraceLog(debugLogPath: string): void {
@@ -247,7 +325,7 @@ function detectShellProfile(): { display: string; path: string } {
 }
 
 
-async function resolveOrCollectApiKey(simulate = false): Promise<string | null> {
+async function resolveOrCollectApiKey(simulate = false, trace = false): Promise<string | null> {
   // Step 1: already in environment (skipped in simulate/dry-run mode)
   if (!simulate) {
     const existing = resolveApiKey();
@@ -267,7 +345,18 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
 
   // Step 2: silently check the OS credential store (skipped in dry-run/simulate mode)
   if (!simulate) {
-    const storedKey = await readFromCredentialStore();
+    const keyDiag = (reason: string) => {
+      p.log.warn(`Credential store unavailable — ${reason}`);
+      if (trace) {
+        try {
+          appendFileSync(
+            join(tmpdir(), 'opencode-starter-debug.log'),
+            `${new Date().toISOString()} keyring: ${reason}\n`,
+          );
+        } catch { /* ignore */ }
+      }
+    };
+    const storedKey = await readFromCredentialStore(keyDiag);
     if (storedKey) {
       const storeName = isMac ? 'macOS Keychain' : isWindows ? 'Windows Credential Manager' : 'Secret Service';
       p.log.success(`Found key in ${storeName}`);
@@ -443,6 +532,130 @@ async function resolveOrCollectApiKey(simulate = false): Promise<string | null> 
   return trimmedKey;
 }
 
+export async function runModelsCommand(): Promise<number> {
+  p.intro(pc.bold('  OpenCode Starter — Favorite Models'));
+
+  const spinner = p.spinner();
+  spinner.start('Loading providers...');
+
+  const catalog = await fetchProviderCatalog();
+  spinner.stop('');
+
+  const allProviders = providersForPicker(catalog);
+
+  if (allProviders.length === 0) {
+    p.log.warn('No providers found.');
+    p.log.info('OpenCode Zen/Go is always available. Local providers appear when OpenCode is running.');
+    p.outro('Done.');
+    return 0;
+  }
+
+  // Build a flat name lookup: "providerId:modelId" → display label
+  const modelLookup = new Map<string, { modelName: string; providerName: string }>();
+  for (const ap of allProviders) {
+    for (const m of ap.models) {
+      modelLookup.set(`${ap.id}:${m.id}`, { modelName: m.name || m.id, providerName: ap.name });
+    }
+  }
+
+  const prefs = loadPreferences();
+  let favorites = prefs.favoriteModels ?? [];
+  let favoritesDirty = false;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    type MenuChoice = string;
+    const options: Array<{ value: MenuChoice; label: string; hint: string }> = [];
+
+    // One entry per saved favorite; selecting it removes it
+    for (let i = 0; i < favorites.length; i++) {
+      const fav = favorites[i]!;
+      const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
+      const label = entry
+        ? `★ ${entry.modelName} (${entry.providerName})`
+        : pc.dim(`★ ${fav.modelId} — provider gone`);
+      options.push({ value: `fav-${i}`, label, hint: 'select to remove' });
+    }
+
+    const atCap = favorites.length >= MAX_MODEL_CATALOG;
+    options.push({
+      value: '__add__',
+      label: atCap ? pc.dim(`+ Add a model → (limit of ${MAX_MODEL_CATALOG} reached)`) : '+ Add a model →',
+      hint: atCap
+        ? 'Remove a favorite first to make room'
+        : `${allProviders.length} provider${allProviders.length !== 1 ? 's' : ''} available`,
+    });
+    options.push({ value: '__done__', label: 'Done', hint: '' });
+
+    const header = favorites.length === 0
+      ? `Favorites (0/${MAX_MODEL_CATALOG})`
+      : `Favorites (${favorites.length}/${MAX_MODEL_CATALOG}) — select to remove`;
+
+    const choice = await p.select<string>({
+      message: header,
+      options,
+      initialValue: '__done__',
+    });
+
+    if (p.isCancel(choice) || choice === '__done__') break;
+
+    if (choice === '__add__') {
+      if (atCap) {
+        p.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached — remove one first.`);
+        continue;
+      }
+
+      const providerOptions = allProviders.map(ap => ({
+        value: ap.id,
+        label: ap.name,
+        hint: `${ap.models.length} model${ap.models.length !== 1 ? 's' : ''}`,
+      }));
+      const pickedProviderId = await p.select<string>({
+        message: 'Which provider?',
+        options: providerOptions,
+      });
+      if (p.isCancel(pickedProviderId)) continue;
+
+      const provider = allProviders.find(ap => ap.id === pickedProviderId)!;
+      const browsed = await browseAllModels(provider, prefs);
+      if (!browsed) continue;
+
+      const fav: FavoriteModel = { providerId: provider.id, modelId: browsed.id };
+      const result = addFavorite(favorites, fav);
+      if (!result.ok) {
+        if (result.reason === 'duplicate') {
+          p.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
+        } else {
+          p.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached — remove one first.`);
+        }
+        continue;
+      }
+      favorites = result.list;
+      favoritesDirty = true;
+      p.log.success(`Added ${browsed.name || browsed.id} (${provider.name}) to favorites.`);
+    } else if ((choice as string).startsWith('fav-')) {
+      const idx = parseInt((choice as string).slice(4), 10);
+      const fav = favorites[idx]!;
+      const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
+      const label = entry ? `${entry.modelName} (${entry.providerName})` : fav.modelId;
+      favorites = removeFavorite(favorites, fav);
+      favoritesDirty = true;
+      p.log.success(`Removed ${label} from favorites.`);
+    }
+  }
+
+  if (favoritesDirty) {
+    savePreferences({ favoriteModels: favorites });
+  }
+
+  p.outro(
+    favorites.length === 0
+      ? 'No favorites saved — launch will use single-model mode.'
+      : pc.green(`${favorites.length} favorite${favorites.length !== 1 ? 's' : ''} saved — /model menu will show these on next launch.`),
+  );
+  return 0;
+}
+
 export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const { dryRun, setup, trace, claudeArgs } = parsed;
 
@@ -458,7 +671,38 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const prefs = dryRun ? {} as ReturnType<typeof loadPreferences> : loadPreferences();
   const conflicts = detectConflicts();
 
+  const favorites = dryRun ? [] : (prefs.favoriteModels ?? []);
+  const switchMenuActive = favorites.length > 0;
+  const hasZenGoFavorites = favorites.some(f => f.providerId === 'zen' || f.providerId === 'go');
+
   p.intro(pc.bold('  OpenCode Starter'));
+
+  // When the switch menu needs Zen/Go catalog routes, resolve the API key and
+  // fetch model info now (before the provider branch) so both branches can use them.
+  let earlyEffectiveKey: string | null = null;
+  let earlyZenModels: ModelInfo[] = [];
+  let earlyGoModels: ModelInfo[] = [];
+
+  if (switchMenuActive && hasZenGoFavorites && !dryRun) {
+    const apiKey = await resolveOrCollectApiKey(false, trace);
+    if (!apiKey) return 0;
+    earlyEffectiveKey = apiKey;
+
+    const zenGoSpinner = p.spinner();
+    zenGoSpinner.start('Fetching OpenCode models for switch menu...');
+    try {
+      const backends: Array<'zen' | 'go'> = [];
+      if (favorites.some(f => f.providerId === 'zen')) backends.push('zen');
+      if (favorites.some(f => f.providerId === 'go')) backends.push('go');
+      const fetched = await fetchZenGoModels(backends, false);
+      earlyZenModels = fetched.zenModels;
+      earlyGoModels = fetched.goModels;
+      zenGoSpinner.stop('');
+    } catch {
+      zenGoSpinner.stop('');
+      p.log.warn('Could not fetch OpenCode models — Zen/Go favorites will be skipped from /model catalog');
+    }
+  }
 
   const providerSpinner = p.spinner();
   providerSpinner.start('Checking for local providers...');
@@ -503,9 +747,11 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   if (providerChoice !== 'opencode') {
     const provider = localProviders!.find(lp => lp.id === providerChoice)!;
 
+    // Model selection — same picker for both single and switch-menu paths
     const selectedModel = await pickLocalModel(provider, conflicts, prefs);
     if (!selectedModel) return 0;
 
+    // Update recents (shared across both paths)
     if (!dryRun) {
       const prevRecent = prefs.recentModelsByProvider?.[provider.id] ?? [];
       const updatedRecent = [selectedModel.id, ...prevRecent.filter(id => id !== selectedModel.id)].slice(0, 3);
@@ -515,6 +761,47 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         recentModelsByProvider: { ...prefs.recentModelsByProvider, [provider.id]: updatedRecent },
       });
     }
+
+    if (switchMenuActive) {
+      const resolveRoute = makeRouteResolver(
+        localProviders,
+        earlyZenModels,
+        earlyGoModels,
+        earlyEffectiveKey,
+      );
+      const startingRoute = localModelToRoute(provider, selectedModel) ?? resolveRoute(provider.id, selectedModel.id);
+      if (!startingRoute) {
+        p.log.error('Could not resolve a proxy route for the selected model.');
+        return 1;
+      }
+      const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+
+      if (dryRun) {
+        const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? '(unknown)';
+        console.log('');
+        console.log(pc.bold(pc.cyan('  DRY RUN — would execute (switch-menu mode):')));
+        console.log('');
+        console.log(`  ${pc.bold('Provider:')}      ${provider.name}`);
+        console.log(`  ${pc.bold('Starting model:')} ${selectedModel.id}`);
+        console.log(`  ${pc.bold('Endpoint:')}      ${endpoint}`);
+        console.log(`  ${pc.bold('/model catalog:')} ${catalogRoutes.length} model(s)`);
+        catalogRoutes.forEach(r => console.log(`    ${pc.dim(r.displayName)}`));
+        console.log('');
+        console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
+        console.log('');
+        return 0;
+      }
+
+      return launchClaudeViaCatalog(
+        catalogRoutes,
+        startingRoute,
+        selectedModel.contextWindow,
+        trace,
+        claudeArgs,
+      );
+    }
+
+    // ── Single-model path (no favorites) ──
 
     if (dryRun) {
       const formatDesc = selectedModel.modelFormat === 'anthropic' ? 'direct passthrough' : 'via translation proxy';
@@ -575,22 +862,19 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
     const debugLogPath = join(tmpdir(), 'opencode-starter-debug.log');
     const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
-    if (trace) {
-      p.log.info(`Debug log: ${debugLogPath}`);
-    }
+    if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 
     const exitCode = await launchClaude(childEnv, selectedModel.id, [...traceArgs, ...claudeArgs]);
     proxyHandle?.close();
-
     if (trace) printTraceLog(debugLogPath);
-
     return exitCode;
   }
 
   // ── OpenCode cloud branch ──
 
-  // In dry-run: simulate a fresh first-run by ignoring all saved state.
-  const apiKey = await resolveOrCollectApiKey(dryRun);
+  // When earlyEffectiveKey was already resolved (because of Zen/Go favorites), reuse it;
+  // otherwise run the normal key resolution now.
+  const apiKey = earlyEffectiveKey ?? await resolveOrCollectApiKey(dryRun, trace);
   if (!apiKey && !dryRun) return 0;
   const effectiveKey = apiKey ?? 'dry-run-placeholder';
 
@@ -613,20 +897,13 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   let goModels: ModelInfo[] = [];
 
   try {
-    if (needsZen) {
-      const cachedZen = getCachedModels('zen') ?? undefined;
-      const result = await getModels(BACKENDS.zen, cachedZen);
-      zenModels = result.models;
-      if (!result.fromCache && !dryRun) setCachedModels('zen', zenModels);
-    }
-    if (needsGo) {
-      const cachedGo = getCachedModels('go') ?? undefined;
-      const result = await getModels(BACKENDS.go, cachedGo);
-      goModels = result.models;
-      if (!result.fromCache && !dryRun) setCachedModels('go', goModels);
-    }
-    const total = zenModels.length + goModels.length;
-    spinner.stop(`Loaded ${total} models`);
+    const backends: Array<'zen' | 'go'> = [];
+    if (needsZen) backends.push('zen');
+    if (needsGo) backends.push('go');
+    const fetched = await fetchZenGoModels(backends, !dryRun);
+    zenModels = fetched.zenModels;
+    goModels = fetched.goModels;
+    spinner.stop(`Loaded ${zenModels.length + goModels.length} models`);
   } catch (err) {
     spinner.stop(pc.red('Failed to load models'));
     console.error(pc.red(String(err instanceof Error ? err.message : err)));
@@ -639,6 +916,26 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   // Persist choices for next run (skipped in dry-run)
   if (!dryRun) savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id, lastProvider: 'opencode' });
+
+  // ── Cloud switch-menu path ── when Zen/Go favorites exist, build a catalog proxy
+  if (switchMenuActive && hasZenGoFavorites && !dryRun) {
+    const resolveRoute = makeRouteResolver(localProviders, earlyZenModels, earlyGoModels, effectiveKey);
+    const startingRoute = zenGoModelToRoute(selection.model, effectiveKey);
+    if (!startingRoute) {
+      p.log.error('Could not resolve a proxy route for the selected model.');
+      return 1;
+    }
+    const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    return launchClaudeViaCatalog(
+      catalogRoutes,
+      startingRoute,
+      selection.model.contextWindow,
+      trace,
+      claudeArgs,
+    );
+  }
+
+  // ── Cloud single-model path ──
 
   // Disable experimental betas only for direct (non-proxy) upstream routes — OpenCode
   // Zen/Go may reject beta headers. Local proxy preserves defer_loading for tool search.
@@ -735,6 +1032,18 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     }
     return runServerCommand();
+  }
+
+  if (parsed.command === 'models') {
+    if (parsed.showVersion) {
+      console.log(VERSION);
+      return 0;
+    }
+    if (parsed.showHelp) {
+      printHelp(modelsHelpText());
+      return 0;
+    }
+    return runModelsCommand();
   }
 
   if (parsed.showVersion) {

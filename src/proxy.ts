@@ -13,7 +13,8 @@ import {
   translateStreamResponses,
   translateToResponses,
 } from './proxy-responses.js';
-import { formatAnthropicModelEntry } from './server/models.js';
+import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
+import { relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
 import { parseToolArguments, sseChunk, stripToolUseIdSuffix, splitToolUseId, encodeToolUseId, serializeToolResultContent, attachSseLineReader, extractSseDataPayload } from './proxy-shared.js';
 import type { AnthropicContentBlock, AnthropicMessage, AnthropicMessageRequest, AnthropicRequestContentPart, OpenAIChatCompletion, OpenAIStreamChunk, OpenAIStreamDelta } from './proxy-types.js';
 import { resolveUpstreamTools } from './tool-search.js';
@@ -22,6 +23,18 @@ import { isMistralUpstream, normalizeMistralMessages, type MistralNormalizeResul
 export interface TranslateRequestOptions {
   completionsUrl?: string;
   mistralNormalize?: MistralNormalizeResult;
+}
+
+type ProxyLog = (message: string | (() => string)) => void;
+
+function makeProxyLog(debug: boolean, logPath = '/tmp/opencode-proxy-debug.log'): ProxyLog {
+  if (!debug) return () => {};
+  return (message) => {
+    try {
+      const line = typeof message === 'function' ? message() : message;
+      appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+    } catch { /* ignore */ }
+  };
 }
 
 function tokenCount(...values: any[]): number {
@@ -571,31 +584,57 @@ export interface ProxyHandle {
   close: () => void;
 }
 
-export function startProxy(
-  completionsUrl: string,
-  modelId: string,
-  debug = false,
-  contextWindow?: number,
-): Promise<ProxyHandle> {
-  const upstreamUrl = completionsUrl;
-  const LOG = '/tmp/opencode-proxy-debug.log';
-  const plog = debug
-    ? (msg: string) => { try { appendFileSync(LOG, `${new Date().toISOString()} ${msg}\n`); } catch { /* ignore */ } }
-    : (_msg: string) => {};
+/**
+ * A single entry in a proxy catalog.
+ * aliasId: the id advertised in /v1/models (must start with 'claude-' or 'anthropic-')
+ * realModelId: the actual model id sent to the upstream provider
+ * upstreamUrl: full chat-completions URL (openai) or base URL without /v1 (anthropic)
+ * apiKey: per-route key; '' signals "use the inbound bearer" (single-model compat)
+ */
+export interface ProxyRoute {
+  aliasId: string;
+  realModelId: string;
+  displayName: string;
+  upstreamUrl: string;
+  apiKey: string;
+  modelFormat: 'anthropic' | 'openai';
+  contextWindow?: number;
+}
 
-  // Synthetic Anthropic-format models response so Claude Code can validate the model
-  // and display the correct context window in the status bar.
-  const modelEntry = formatAnthropicModelEntry(modelId, modelId, contextWindow);
-  const modelsResponse = JSON.stringify({
-    data: [modelEntry],
-    has_more: false,
-    first_id: modelId,
-    last_id: modelId,
-  });
-  const singleModelResponse = JSON.stringify(modelEntry);
+/**
+ * Produce a gateway-discovery-safe alias for a model id.
+ * Claude Code's gateway discovery only shows ids starting with 'claude' or 'anthropic'.
+ * claude-* ids are returned unchanged; everything else gets an 'anthropic-{provider}__' prefix.
+ */
+export function aliasModelId(realId: string, providerLabel: string): string {
+  if (realId.startsWith('claude-')) return realId;
+  const sanitized = providerLabel.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return `anthropic-${sanitized}__${realId}`;
+}
+
+/** Multi-model proxy: routes each request by body.model to the correct upstream. */
+export function startProxyCatalog(
+  routes: ProxyRoute[],
+  defaultAliasId: string,
+  debug = false,
+): Promise<ProxyHandle> {
+  if (routes.length === 0) {
+    return Promise.reject(new Error('Proxy catalog requires at least one route'));
+  }
+
+  const byAlias = new Map(routes.map(r => [r.aliasId, r]));
+  const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0]!;
+
+  const plog = makeProxyLog(debug);
+
+  const modelsPayload = JSON.stringify(
+    formatAnthropicModelList(
+      routes.map(r => ({ id: r.aliasId, name: r.displayName, contextWindow: r.contextWindow })),
+    ),
+  );
 
   const server = createServer(async (req, res) => {
-    plog(`${req.method} ${req.url}`);
+    plog(() => `${req.method} ${req.url}`);
 
     // HEAD / — health check ping from Claude Code
     if (req.method === 'HEAD') {
@@ -604,22 +643,29 @@ export function startProxy(
       return;
     }
 
-    // GET /v1/models — Claude Code validates the model on startup
+    // GET /v1/models — Claude Code validates the model on startup and populates /model picker
     if (req.method === 'GET' && req.url?.startsWith('/v1/models')) {
       const modelPathMatch = req.url.match(/^\/v1\/models\/([^?]+)/);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(modelPathMatch ? singleModelResponse : modelsResponse);
+      if (modelPathMatch) {
+        const id = decodeURIComponent(modelPathMatch[1]);
+        const route = byAlias.get(id);
+        if (route) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(formatAnthropicModelEntry(route.aliasId, route.displayName, route.contextWindow)));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { type: 'not_found_error', message: `Model '${id}' not found` } }));
+        }
+      } else {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(modelsPayload);
+      }
       return;
     }
 
     // POST /v1/messages — the main translation path (Claude Code appends ?beta=true or similar)
     if (req.method === 'POST' && req.url?.startsWith('/v1/messages')) {
-      const apiKey = extractApiKey(req);
-      plog(`POST /v1/messages - key=${apiKey ? `len:${apiKey.length}` : 'MISSING'}`);
-      if (!apiKey) {
-        anthropicError(res, 401, 'Missing API key');
-        return;
-      }
+      const inboundKey = extractApiKey(req);
 
       let anthropicBody: any;
       try {
@@ -633,18 +679,52 @@ export function startProxy(
       const originalModel = anthropicBody.model;
       const clientWantsStream = Boolean(anthropicBody.stream);
 
+      // Per-request route resolution: look up the alias, fall back to default
+      const route = byAlias.get(originalModel) ?? defaultRoute;
+      const apiKey = route.apiKey || inboundKey || '';
+      const upstreamUrl = route.upstreamUrl;
+
+      plog(() =>
+        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
+      );
+
+      if (!apiKey) {
+        anthropicError(res, 401, 'Missing API key');
+        return;
+      }
+
+      // ── Anthropic passthrough ───────────────────────────────────────
+      // Forward raw Anthropic body (with real model id) directly to the upstream.
+      // No translation needed — the upstream speaks Anthropic natively.
+      if (route.modelFormat === 'anthropic') {
+        const forwardBody = { ...anthropicBody, model: route.realModelId };
+        const targetUrl = `${upstreamUrl}/v1/messages`;
+        plog(() => `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}`);
+        try {
+          await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream);
+        } catch (err) {
+          const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
+          plog(() => `anthropic-passthrough error: ${message}`);
+          anthropicError(res, 502, message);
+        }
+        return;
+      }
+
+      // Rewrite body.model to the real upstream id before any translation
+      anthropicBody = { ...anthropicBody, model: route.realModelId };
+
       // ── Gemini native path ──────────────────────────────────────────
       // Use Gemini's generateContent API instead of the OpenAI-compatible endpoint.
       // The OpenAI-compatible endpoint strips thought_signature from tool_call responses,
       // making it impossible to echo back — breaking multi-turn tool use and thinking.
       if (isGeminiUrl(upstreamUrl)) {
-        const nativeUrl = geminiNativeUrl(originalModel, clientWantsStream);
+        const nativeUrl = geminiNativeUrl(route.realModelId, clientWantsStream);
         const geminiBody = translateToGemini(anthropicBody);
         const geminiTools = geminiBody.tools as Array<{ functionDeclarations?: unknown[] }> | undefined;
         const geminiContents = geminiBody.contents as unknown[] | undefined;
         const totalTools = anthropicBody.tools?.length ?? 0;
         const upstreamCount = geminiTools?.[0]?.functionDeclarations?.length ?? 0;
-        plog(`gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${upstreamCount}/${totalTools}, msgs=${geminiContents?.length ?? 0}`);
+        plog(() => `gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${upstreamCount}/${totalTools}, msgs=${geminiContents?.length ?? 0}`);
 
         let upstreamRes: Response;
         try {
@@ -657,16 +737,16 @@ export function startProxy(
             body: JSON.stringify(geminiBody),
           });
         } catch (err) {
-          plog(`gemini upstream error: ${err instanceof Error ? err.message : String(err)}`);
+          plog(() => `gemini upstream error: ${err instanceof Error ? err.message : String(err)}`);
           anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
 
-        plog(`gemini upstream ${upstreamRes.status}`);
+        plog(() => `gemini upstream ${upstreamRes.status}`);
 
         if (!upstreamRes.ok) {
           const errBody = await upstreamRes.text();
-          plog(`gemini error body: ${errBody.slice(0, 500)}`);
+          plog(() => `gemini error body: ${errBody.slice(0, 500)}`);
           res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
           res.end(errBody);
           return;
@@ -695,13 +775,13 @@ export function startProxy(
       }
 
       // ── OpenAI Responses API path (GPT-5.4+, Codex, o-series) ───────
-      if (isOpenAIChatCompletionsUrl(upstreamUrl) && modelPrefersResponsesApi(originalModel)) {
+      if (isOpenAIChatCompletionsUrl(upstreamUrl) && modelPrefersResponsesApi(route.realModelId)) {
         const responsesUrl = openAIResponsesUrl(upstreamUrl);
         const responsesBody = translateToResponses(anthropicBody);
         const responsesInput = responsesBody.input as unknown[] | undefined;
         const responsesTools = responsesBody.tools as unknown[] | undefined;
         const totalTools = anthropicBody.tools?.length ?? 0;
-        plog(
+        plog(() =>
           `openai-responses: model=${originalModel}, stream=${clientWantsStream}, ` +
           `tools=${responsesTools?.length ?? 0}/${totalTools}, msgs=${responsesInput?.length ?? 0}`,
         );
@@ -718,16 +798,16 @@ export function startProxy(
             body: JSON.stringify(responsesBody),
           });
         } catch (err) {
-          plog(`openai-responses upstream error: ${err instanceof Error ? err.message : String(err)}`);
+          plog(() => `openai-responses upstream error: ${err instanceof Error ? err.message : String(err)}`);
           anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
 
-        plog(`openai-responses upstream ${upstreamRes.status} from ${responsesUrl}`);
+        plog(() => `openai-responses upstream ${upstreamRes.status} from ${responsesUrl}`);
 
         if (!upstreamRes.ok) {
           const errBody = await upstreamRes.text();
-          plog(`openai-responses error body: ${errBody.slice(0, 500)}`);
+          plog(() => `openai-responses error body: ${errBody.slice(0, 500)}`);
           res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
           res.end(errBody);
           return;
@@ -759,7 +839,7 @@ export function startProxy(
       const openaiBody = translateRequest(anthropicBody, translateOpts);
       if (translateOpts.mistralNormalize) {
         const n = translateOpts.mistralNormalize;
-        plog(
+        plog(() =>
           `mistral-normalize: hoisted ${n.hoistedSystemBlocks} system block(s), ` +
           `inserted ${n.insertedAssistantFillers} assistant filler(s)`,
         );
@@ -767,7 +847,7 @@ export function startProxy(
       const openaiTools = openaiBody.tools as unknown[] | undefined;
       const openaiMessages = openaiBody.messages as unknown[] | undefined;
       const totalTools = anthropicBody.tools?.length ?? 0;
-      plog(`openai: tools=${openaiTools?.length ?? 0}/${totalTools}, stream=${openaiBody.stream ?? false}, msgs=${openaiMessages?.length ?? 0}`);
+      plog(() => `openai: tools=${openaiTools?.length ?? 0}/${totalTools}, stream=${openaiBody.stream ?? false}, msgs=${openaiMessages?.length ?? 0}`);
 
       let upstreamRes: Response;
       try {
@@ -780,16 +860,16 @@ export function startProxy(
           body: JSON.stringify(openaiBody),
         });
       } catch (err) {
-        plog(`upstream error: ${err instanceof Error ? err.message : String(err)}`);
+        plog(() => `upstream error: ${err instanceof Error ? err.message : String(err)}`);
         anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
 
-      plog(`upstream ${upstreamRes.status} from ${upstreamUrl}`);
+      plog(() => `upstream ${upstreamRes.status} from ${upstreamUrl}`);
 
       if (!upstreamRes.ok) {
         const errBody = await upstreamRes.text();
-        plog(`upstream error body: ${errBody.slice(0, 500)}`);
+        plog(() => `upstream error body: ${errBody.slice(0, 500)}`);
         res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
         res.end(errBody);
         return;
@@ -825,11 +905,29 @@ export function startProxy(
         reject(new Error('Failed to bind proxy'));
         return;
       }
-      plog(`started on port ${addr.port}, forwarding to ${upstreamUrl}`);
+      plog(() => `started on port ${addr.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`);
       resolve({
         port: addr.port,
         close: () => server.close(),
       });
     });
   });
+}
+
+/** Single-model proxy — backward-compatible wrapper around startProxyCatalog. */
+export function startProxy(
+  completionsUrl: string,
+  modelId: string,
+  debug = false,
+  contextWindow?: number,
+): Promise<ProxyHandle> {
+  return startProxyCatalog([{
+    aliasId: modelId,
+    realModelId: modelId,
+    displayName: modelId,
+    upstreamUrl: completionsUrl,
+    apiKey: '',     // '' → use inbound bearer from Claude Code (single-model compat)
+    modelFormat: 'openai',
+    contextWindow,
+  }], modelId, debug);
 }

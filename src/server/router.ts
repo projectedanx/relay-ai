@@ -7,6 +7,7 @@ import {
   type ServerBackendId,
   type ServerModelInfo,
 } from './models.js';
+import { postJsonUpstream } from '../upstream-forward.js';
 import { Readable } from 'node:stream';
 import { translateRequest, translateResponse, translateStream, type TranslateRequestOptions } from '../proxy.js';
 import {
@@ -247,24 +248,8 @@ function backendFor(options: ServerOptions, model: ServerModelInfo): ServerBacke
 }
 
 async function forwardJson(res: ServerResponse, url: string, body: JsonBody, apiKey: string): Promise<void> {
-  const upstream = await postJson(url, body, apiKey);
+  const upstream = await postJsonUpstream(url, body, apiKey);
   sendJson(res, upstream.status, upstream.body);
-}
-
-async function postJson(url: string, body: JsonBody, apiKey: string): Promise<{ status: number; body: any }> {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'X-API-Key': apiKey,
-    },
-    body: JSON.stringify(body),
-  });
-
-  const text = await response.text();
-  const parsed = text ? JSON.parse(text) : null;
-  return { status: response.status, body: parsed };
 }
 
 async function readJson(req: IncomingMessage): Promise<JsonBody | null> {

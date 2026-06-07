@@ -33,6 +33,7 @@ export function buildChildEnv(
   apiKey: string,
   proxyPort?: number,
   contextWindow?: number,
+  enableGatewayDiscovery?: boolean,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
@@ -45,25 +46,46 @@ export function buildChildEnv(
   env['ANTHROPIC_MODEL'] = model;
   // Claude Code defaults to 200K for non-api.anthropic.com base URLs; override when we know better.
   env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = String(resolveContextWindow(model, contextWindow));
+  if (enableGatewayDiscovery) {
+    env['CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY'] = '1';
+  }
   applyClaudeCodeThirdPartyCompat(env);
   return env;
 }
 
-export async function readFromCredentialStore(): Promise<string | null> {
+/** Classify a keyring error into a human-readable reason (never throws). */
+export function classifyKeyringError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  if (lower.includes('cannot find module') || lower.includes('module not found') || lower.includes('failed to load')) {
+    return 'native keyring module not available on this system';
+  }
+  if (lower.includes('secret service') || lower.includes('dbus') || lower.includes('daemon')) {
+    return 'Secret Service daemon is not running (start GNOME Keyring or KWallet)';
+  }
+  if (lower.includes('denied') || lower.includes('locked') || lower.includes('cancelled') || lower.includes('user refused')) {
+    return 'keychain access was denied or the keychain is locked';
+  }
+  return `keyring error: ${msg}`;
+}
+
+export async function readFromCredentialStore(diag?: (msg: string) => void): Promise<string | null> {
   try {
     const { Entry } = await import('@napi-rs/keyring');
     return new Entry('opencode-starter', 'opencode-starter').getPassword() ?? null;
-  } catch {
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
     return null;
   }
 }
 
-export async function saveToCredentialStore(key: string): Promise<boolean> {
+export async function saveToCredentialStore(key: string, diag?: (msg: string) => void): Promise<boolean> {
   try {
     const { Entry } = await import('@napi-rs/keyring');
     new Entry('opencode-starter', 'opencode-starter').setPassword(key);
     return true;
-  } catch {
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
     return false;
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "opencode-starter",
   "version": "0.3.0",
-  "description": "Launch Claude Code with OpenCode Zen or Go as the Anthropic API backend",
+  "description": "Launch Claude Code with OpenCode Zen, Go, or local providers — with mid-session model switching via favorites",
   "author": "jacob-bd",
   "license": "MIT",
   "repository": {

@@ -45,6 +45,9 @@ export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models
 
 export const MODELS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+/** Max models in favorites list and mid-session /model switch catalog. */
+export const MAX_MODEL_CATALOG = 10;
+
 // Models whose "free" status is stale — promotion ended but API still lists them.
 // Filtered to avoid misleading users into selecting a non-functional free model.
 export const STALE_FREE_MODELS = new Set([

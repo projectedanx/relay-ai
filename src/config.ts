@@ -1,4 +1,4 @@
-import type { UserPreferences, ModelInfo } from './types.js';
+import type { UserPreferences, ModelInfo, FavoriteModel } from './types.js';
 import { MODELS_CACHE_TTL_MS } from './constants.js';
 import { dirname } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -51,18 +51,20 @@ export function loadPreferences(): UserPreferences {
     lastModel: config.lastModel,
     lastProvider: config.lastProvider,
     recentModelsByProvider: config.recentModelsByProvider,
+    favoriteModels: config.favoriteModels,
     subscriptionTier: config.subscriptionTier,
     modelListCache: config.modelListCache,
     server: config.server,
   };
 }
 
-export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBackend' | 'lastModel' | 'lastProvider' | 'recentModelsByProvider'>>): void {
+export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBackend' | 'lastModel' | 'lastProvider' | 'recentModelsByProvider' | 'favoriteModels'>>): void {
   const config = readConfig();
   if (prefs.lastBackend !== undefined) config.lastBackend = prefs.lastBackend;
   if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
   if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
   if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
+  if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
   writeConfig(config);
 }
 

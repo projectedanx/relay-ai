@@ -2,7 +2,7 @@
 
 > A launcher toolkit for AI coding tools powered by [OpenCode](https://opencode.ai) backends.
 
-opencode-starter is an interactive CLI wizard that configures and launches AI coding tools — starting with Claude Code — using OpenCode Zen or Go as the API backend. Built to be extensible: future tools (Codex, Aider, and others) will be added over time.
+opencode-starter is an interactive CLI wizard that configures and launches AI coding tools — starting with Claude Code — using OpenCode Zen, Go, or your own local providers (Groq, Mistral, OpenAI, Gemini, Ollama, and more). Built to be extensible: future tools (Codex, Aider, and others) will be added over time.
 
 [![Watch the demo on YouTube](https://img.youtube.com/vi/kyeqlyF4WCQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=kyeqlyF4WCQ)
 
@@ -16,13 +16,17 @@ opencode-starter is an interactive CLI wizard that configures and launches AI co
 - **Secure key storage** — stores your API key in the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or your shell profile — your choice
 - **Cross-platform** — macOS, Windows, and Linux (Ubuntu, Fedora, and other distros with GNOME Keyring or KWallet)
 - **Dry run mode** — preview exactly what would be run without launching anything
-- **Preference memory** — remembers your last backend and model, pre-selects them next time
+- **Preference memory** — remembers your last backend, provider, and model, pre-selects them next time
+- **Local providers** — use models from your [OpenCode](https://opencode.ai) config (BYOK) alongside Zen/Go cloud backends
+- **Favorite models** — save up to 10 favorites and switch between them mid-session via Claude Code's `/model` command
+- **Smart model pickers** — recent models per provider, search for large lists (>25), or paginated browse (15 per page)
 
 ## Supported tools
 
 | Tool | Command | Status |
 |------|---------|--------|
 | Claude Code | `opencode-starter claude` | ✅ Supported |
+| Favorite models | `opencode-starter models` | ✅ Supported |
 | API server | `opencode-starter server` | ✅ Supported |
 | Codex | `opencode-starter codex` | 🔜 Planned |
 
@@ -30,7 +34,8 @@ opencode-starter is an interactive CLI wizard that configures and launches AI co
 
 - Node.js 18+
 - One of the supported AI coding tools installed (e.g. [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code))
-- An [OpenCode API key](https://opencode.ai/auth)
+- An [OpenCode API key](https://opencode.ai/auth) for Zen/Go cloud backends
+- [OpenCode CLI](https://opencode.ai) installed and configured for local providers (optional — only needed if you want Groq, Mistral, OpenAI, Gemini, Ollama, etc.)
 
 ## Installation
 
@@ -63,9 +68,21 @@ The key is always active immediately in the current session regardless of which 
 opencode-starter claude
 ```
 
-On first run, the wizard asks about your OpenCode subscription so it can show the right models. This is saved and skipped on subsequent runs.
+On first run, the wizard asks about your OpenCode subscription so it can show the right models. This is saved and skipped on subsequent runs. If local providers are configured in OpenCode, you'll also be asked which provider to use (cloud Zen/Go or a local one).
 
 Bare `opencode-starter` now prints help and migration guidance. It no longer launches Claude Code. Use `opencode-starter claude` for the Claude Code wizard and launcher.
+
+### Favorite models and mid-session switching
+
+Save models you switch between often:
+
+```bash
+opencode-starter models
+```
+
+Add up to 10 favorites from Zen, Go, or any local provider. When you have favorites, `opencode-starter claude` automatically starts a multi-route proxy. Claude Code's `/model` command then lists your starting model plus favorites — switch live without restarting.
+
+With no favorites, launch behaves exactly as before (single model, no switch menu). `--dry-run` ignores saved favorites so you can preview a single-model launch.
 
 ### Flags
 
@@ -127,6 +144,8 @@ export ANTHROPIC_API_KEY="<server-password>"
 
 By default, the server password is kept in memory only. If you choose to save it, OpenCode Starter stores it in `~/.opencode-starter/config.json`.
 
+The server loads Zen/Go models plus any configured local providers (same discovery as `claude`). Spinner output shows how many models came from local providers.
+
 The server also exposes OpenAI-compatible endpoints for OpenAI-format models:
 
 ```bash
@@ -171,7 +190,7 @@ OpenCode exposes models through different API formats. opencode-starter handles 
 | Gemini native | Gemini (local Google provider) | Proxy uses Gemini native API, not OpenAI-compat | `via proxy` |
 | Not in cloud wizard | GPT, Gemini on OpenCode Zen/Go | Use local provider instead (OpenAI/Google in OpenCode config) | `not yet supported` |
 
-The translation proxy starts automatically on a random local port for proxy-routed models and stops when Claude Code exits.
+The translation proxy starts automatically on a random local port for proxy-routed models and stops when Claude Code exits. Each `opencode-starter claude` session gets its own port — multiple terminals are safe. (`opencode-starter server` uses a fixed port `17645`; only one server instance per machine.)
 
 ### Provider notes
 
@@ -196,7 +215,7 @@ If the native module fails to load on an unsupported platform, the credential st
 
 ### Preference persistence
 
-Your last backend, model selection, subscription tier, model cache, and optional saved server password are saved to:
+Your last backend, provider, model selection, recent models per provider, favorite models, subscription tier, model cache, and optional saved server password are saved to:
 
 ```text
 ~/.opencode-starter/config.json

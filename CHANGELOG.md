@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- `opencode-starter models` — interactive favorites manager (add/remove, max 10) for mid-session model switching.
+- Multi-route catalog proxy (`startProxyCatalog`) — when favorites exist, launch starts a proxy with your starting model plus favorites; Claude Code `/model` shows them via `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`.
+- Model picker search (lists >25 models) and paginated browse (15 per page with prev/next).
+- Recent models per provider (up to 3) shown at the top of local-provider pickers.
+- Shared modules: `src/catalog.ts`, `src/favorites.ts`, `src/provider-catalog.ts`, `src/upstream-forward.ts`.
+
+### Changed
+- Cloud and local-provider favorites can be mixed in the switch menu; routes resolve per provider (Zen, Go, or local).
+- Favorites manager saves once on Done instead of after every add/remove.
+- Server router and proxy share upstream forwarding helpers from `src/upstream-forward.ts`.
+
+## [0.3.0] - 2026-06-05
+
+### Added
+- Local OpenCode provider discovery — pick Groq, Mistral, xAI, Anthropic-direct, Ollama, Google/Gemini, OpenAI, and other configured providers at launch.
+- Gemini native API translation (`src/proxy-gemini.ts`) — full thinking mode and correct `thought_signature` round-trips on tool calls.
+- OpenAI Responses API routing (`src/proxy-responses.ts`) for GPT-5.4+, GPT-5.5, Codex, and o-series when using a local OpenAI provider.
+- Mistral message-order normalization (`src/mistral-messages.ts`) for tool-heavy sessions.
+- Tool-search beta passthrough for local proxy sessions.
+- Accurate `context_window` in synthetic `/v1/models` responses for Claude Code's status bar.
+- Server mode includes local-provider models with per-model routing; `GET /models` strips `apiKey` from output.
+
+### Fixed
+- `thought_signature` preserved through Anthropic ↔ OpenAI and Anthropic ↔ Gemini native round-trips.
+- `prompt_cache_key` removed from OpenAI translation output (rejected by Google, Groq, Mistral).
+- Gemini tool schema sanitization (allow-list, `required[]` filtering, exclusive min/max stripping).
+- Shell injection hardening in API key save paths (macOS profile quoting, Windows `setx` arg array).
+- Server streaming for openai-format models; empty `completionsUrl` guard; apiKey exposure on `/models`.
+
 ## [0.2.5] - 2026-06-05
 
 - Fix: Pass `X-API-Key` headers to upstream servers for paid Anthropic-format models.

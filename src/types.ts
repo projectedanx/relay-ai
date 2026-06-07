@@ -2,7 +2,7 @@
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
-export type StarterCommand = 'root' | 'claude' | 'server';
+export type StarterCommand = 'root' | 'claude' | 'server' | 'models';
 
 export interface BackendConfig {
   id: 'zen' | 'go';
@@ -47,11 +47,17 @@ export interface LocalProvider {
   models: LocalProviderModel[];
 }
 
+export interface FavoriteModel {
+  providerId: string;
+  modelId: string;
+}
+
 export interface UserPreferences {
   lastBackend?: 'zen' | 'go';
   lastModel?: string;
   lastProvider?: string;
   recentModelsByProvider?: Record<string, string[]>;
+  favoriteModels?: FavoriteModel[];
   subscriptionTier?: 'free' | 'zen' | 'go' | 'both';
   server?: {
     savedPassword?: string;

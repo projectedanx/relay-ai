@@ -100,6 +100,7 @@ var CONFLICTING_ENV_VARS = [
 ];
 var OPENCODE_CACHE_PATH = join2(homedir2(), ".cache", "opencode", "models.json");
 var MODELS_CACHE_TTL_MS = 60 * 60 * 1e3;
+var MAX_MODEL_CATALOG = 10;
 var STALE_FREE_MODELS = /* @__PURE__ */ new Set([
   "qwen3.6-plus-free",
   // 401 — free promotion ended
@@ -226,7 +227,7 @@ function applyClaudeCodeThirdPartyCompat(env) {
   env["ENABLE_TOOL_SEARCH"] = "true";
   env["CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT"] = "0";
 }
-function buildChildEnv(baseUrl, model, apiKey, proxyPort, contextWindow) {
+function buildChildEnv(baseUrl, model, apiKey, proxyPort, contextWindow, enableGatewayDiscovery) {
   const env = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
     delete env[name];
@@ -235,23 +236,42 @@ function buildChildEnv(baseUrl, model, apiKey, proxyPort, contextWindow) {
   env["ANTHROPIC_API_KEY"] = apiKey;
   env["ANTHROPIC_MODEL"] = model;
   env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = String(resolveContextWindow(model, contextWindow));
+  if (enableGatewayDiscovery) {
+    env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1";
+  }
   applyClaudeCodeThirdPartyCompat(env);
   return env;
 }
-async function readFromCredentialStore() {
+function classifyKeyringError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  if (lower.includes("cannot find module") || lower.includes("module not found") || lower.includes("failed to load")) {
+    return "native keyring module not available on this system";
+  }
+  if (lower.includes("secret service") || lower.includes("dbus") || lower.includes("daemon")) {
+    return "Secret Service daemon is not running (start GNOME Keyring or KWallet)";
+  }
+  if (lower.includes("denied") || lower.includes("locked") || lower.includes("cancelled") || lower.includes("user refused")) {
+    return "keychain access was denied or the keychain is locked";
+  }
+  return `keyring error: ${msg}`;
+}
+async function readFromCredentialStore(diag) {
   try {
     const { Entry } = await import("@napi-rs/keyring");
     return new Entry("opencode-starter", "opencode-starter").getPassword() ?? null;
-  } catch {
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
     return null;
   }
 }
-async function saveToCredentialStore(key) {
+async function saveToCredentialStore(key, diag) {
   try {
     const { Entry } = await import("@napi-rs/keyring");
     new Entry("opencode-starter", "opencode-starter").setPassword(key);
     return true;
-  } catch {
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
     return false;
   }
 }
@@ -265,116 +285,9 @@ async function isSecretServiceAvailable() {
   }
 }
 
-// src/models.ts
-var BRAND_MAP = [
-  ["claude", "Claude"],
-  ["gpt", "GPT"],
-  ["gemini", "Gemini"],
-  ["deepseek", "DeepSeek"],
-  ["qwen", "Qwen"],
-  ["minimax", "MiniMax"],
-  ["kimi", "Kimi"],
-  ["glm", "GLM"],
-  ["mimo", "MiMo"],
-  ["grok", "Grok"],
-  ["nemotron", "Nemotron"]
-];
-function deriveBrand(family) {
-  const lower = family.toLowerCase();
-  for (const [prefix, brand] of BRAND_MAP) {
-    if (lower.startsWith(prefix)) return brand;
-  }
-  return "Other";
-}
-function readModelsFromCache(backendId) {
-  const cache = loadOpencodeCache();
-  if (!cache) return null;
-  const providerKey = backendId === "zen" ? "opencode" : "opencode-go";
-  const providerData = cache[providerKey];
-  if (!providerData?.models) return null;
-  const result = /* @__PURE__ */ new Map();
-  for (const entry of Object.values(providerData.models)) {
-    if (!entry.id || entry.status === "deprecated") continue;
-    const isFree = entry.cost !== void 0 && entry.cost.input === 0 && entry.cost.output === 0;
-    const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
-    result.set(entry.id, {
-      id: entry.id,
-      name: entry.name ?? entry.id,
-      isFree,
-      brand: deriveBrand(entry.family ?? ""),
-      sourceBackend: backendId,
-      modelFormat,
-      cost: entry.cost,
-      contextWindow: resolveContextWindow(entry.id, entry.limit?.context)
-    });
-  }
-  return result;
-}
-async function fetchModelsFromApi(backend) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5e3);
-  try {
-    const res = await fetch(`${backend.baseUrl}/v1/models`, {
-      signal: controller.signal,
-      headers: { Authorization: "Bearer test" }
-    });
-    if (!res.ok) throw new Error(`API returned HTTP ${res.status}`);
-    const body = await res.json();
-    return body.data.map((m) => m.id);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-function mergeModels(apiIds, cache, backendId) {
-  return apiIds.filter((id) => !STALE_FREE_MODELS.has(id)).map((id) => {
-    const cached = cache?.get(id);
-    if (cached) return { ...cached, sourceBackend: backendId };
-    const modelFormat = classifyModelFormat(id, void 0);
-    return {
-      id,
-      name: id,
-      isFree: false,
-      brand: "Other",
-      sourceBackend: backendId,
-      modelFormat,
-      contextWindow: resolveContextWindow(id)
-    };
-  });
-}
-function groupModels(models) {
-  const free = models.filter((m) => m.isFree).sort((a, b) => a.id.localeCompare(b.id));
-  const byBrand = /* @__PURE__ */ new Map();
-  for (const m of models.filter((m2) => !m2.isFree)) {
-    const list = byBrand.get(m.brand) ?? [];
-    list.push(m);
-    byBrand.set(m.brand, list);
-  }
-  for (const [brand, list] of byBrand) {
-    byBrand.set(brand, list.sort((a, b) => a.id.localeCompare(b.id)));
-  }
-  return { free, byBrand };
-}
-async function getModels(backend, fallbackModels) {
-  const cache = readModelsFromCache(backend.id);
-  try {
-    const apiIds = await fetchModelsFromApi(backend);
-    return { models: mergeModels(apiIds, cache, backend.id), fromCache: false };
-  } catch {
-    if (cache && cache.size > 0) {
-      return { models: [...cache.values()], fromCache: true };
-    }
-    if (fallbackModels && fallbackModels.length > 0) {
-      return { models: fallbackModels, fromCache: true };
-    }
-    throw new Error(
-      "Cannot fetch models. Check your network and https://opencode.ai status."
-    );
-  }
-}
-
 // src/proxy.ts
 import { createServer } from "http";
-import { Readable as Readable3 } from "stream";
+import { Readable as Readable4 } from "stream";
 import { appendFileSync } from "fs";
 
 // src/proxy-gemini.ts
@@ -1562,13 +1475,18 @@ function createModelCatalog(models) {
     list: () => [...models]
   };
 }
-function formatAnthropicModels(models) {
+function formatAnthropicModelList(entries) {
   return {
-    data: models.map((model) => formatAnthropicModelEntry(model.id, model.name, model.contextWindow)),
+    data: entries.map((entry) => formatAnthropicModelEntry(entry.id, entry.name, entry.contextWindow)),
     has_more: false,
-    first_id: models[0]?.id ?? null,
-    last_id: models.at(-1)?.id ?? null
+    first_id: entries[0]?.id ?? null,
+    last_id: entries.at(-1)?.id ?? null
   };
+}
+function formatAnthropicModels(models) {
+  return formatAnthropicModelList(
+    models.map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow }))
+  );
 }
 function formatOpenAIModels(models) {
   return {
@@ -1580,6 +1498,75 @@ function formatOpenAIModels(models) {
       owned_by: model.sourceBackend
     }))
   };
+}
+
+// src/upstream-forward.ts
+import { Readable as Readable3 } from "stream";
+function anthropicUpstreamHeaders(apiKey, stream = false) {
+  return {
+    "Content-Type": "application/json",
+    "anthropic-version": "2023-06-01",
+    Authorization: `Bearer ${apiKey}`,
+    "x-api-key": apiKey,
+    ...stream ? { Accept: "text/event-stream" } : {}
+  };
+}
+async function postJsonUpstream(url, body, apiKey) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: anthropicUpstreamHeaders(apiKey, false),
+    body: JSON.stringify(body)
+  });
+  const text3 = await response.text();
+  let parsed = null;
+  if (text3) {
+    try {
+      parsed = JSON.parse(text3);
+    } catch {
+      parsed = text3;
+    }
+  }
+  return { status: response.status, body: parsed };
+}
+var UpstreamUnreachableError = class extends Error {
+  constructor(cause) {
+    super(`Upstream unreachable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "UpstreamUnreachableError";
+  }
+};
+async function relayAnthropicMessages(res, messagesUrl, body, apiKey, clientWantsStream) {
+  let upstreamRes;
+  try {
+    upstreamRes = await fetch(messagesUrl, {
+      method: "POST",
+      headers: anthropicUpstreamHeaders(apiKey, clientWantsStream),
+      body: JSON.stringify(body)
+    });
+  } catch (err) {
+    throw new UpstreamUnreachableError(err);
+  }
+  if (!upstreamRes.ok) {
+    const errBody = await upstreamRes.text();
+    res.writeHead(upstreamRes.status, { "Content-Type": upstreamRes.headers.get("content-type") || "application/json" });
+    res.end(errBody);
+    return;
+  }
+  if (clientWantsStream && upstreamRes.body) {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    });
+    Readable3.fromWeb(upstreamRes.body).pipe(res);
+    return;
+  }
+  const json = await upstreamRes.json();
+  const payload = JSON.stringify(json);
+  res.writeHead(200, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(payload).toString()
+  });
+  res.end(payload);
 }
 
 // src/mistral-messages.ts
@@ -1625,6 +1612,18 @@ function normalizeMistralMessages(messages) {
 }
 
 // src/proxy.ts
+function makeProxyLog(debug, logPath = "/tmp/opencode-proxy-debug.log") {
+  if (!debug) return () => {
+  };
+  return (message) => {
+    try {
+      const line = typeof message === "function" ? message() : message;
+      appendFileSync(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${line}
+`);
+    } catch {
+    }
+  };
+}
 function tokenCount(...values) {
   for (const value of values) {
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1829,7 +1828,7 @@ function translateStream(upstreamBody, model) {
   let finishReason = null;
   let messageStarted = false;
   const toolCallState = /* @__PURE__ */ new Map();
-  const output = new Readable3({ read() {
+  const output = new Readable4({ read() {
   } });
   function emitSSE(eventType, data) {
     output.push(sseChunk(eventType, data));
@@ -2105,27 +2104,25 @@ function sendAnthropicAsSSE(res, anthropicResponse) {
   res.write(sseChunk("message_stop", { type: "message_stop" }));
   res.end();
 }
-function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
-  const upstreamUrl = completionsUrl;
-  const LOG = "/tmp/opencode-proxy-debug.log";
-  const plog = debug ? (msg) => {
-    try {
-      appendFileSync(LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${msg}
-`);
-    } catch {
-    }
-  } : (_msg) => {
-  };
-  const modelEntry = formatAnthropicModelEntry(modelId, modelId, contextWindow);
-  const modelsResponse = JSON.stringify({
-    data: [modelEntry],
-    has_more: false,
-    first_id: modelId,
-    last_id: modelId
-  });
-  const singleModelResponse = JSON.stringify(modelEntry);
+function aliasModelId(realId, providerLabel) {
+  if (realId.startsWith("claude-")) return realId;
+  const sanitized = providerLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return `anthropic-${sanitized}__${realId}`;
+}
+function startProxyCatalog(routes, defaultAliasId, debug = false) {
+  if (routes.length === 0) {
+    return Promise.reject(new Error("Proxy catalog requires at least one route"));
+  }
+  const byAlias = new Map(routes.map((r) => [r.aliasId, r]));
+  const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0];
+  const plog = makeProxyLog(debug);
+  const modelsPayload = JSON.stringify(
+    formatAnthropicModelList(
+      routes.map((r) => ({ id: r.aliasId, name: r.displayName, contextWindow: r.contextWindow }))
+    )
+  );
   const server = createServer(async (req, res) => {
-    plog(`${req.method} ${req.url}`);
+    plog(() => `${req.method} ${req.url}`);
     if (req.method === "HEAD") {
       res.writeHead(200);
       res.end();
@@ -2133,17 +2130,24 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
     }
     if (req.method === "GET" && req.url?.startsWith("/v1/models")) {
       const modelPathMatch = req.url.match(/^\/v1\/models\/([^?]+)/);
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(modelPathMatch ? singleModelResponse : modelsResponse);
+      if (modelPathMatch) {
+        const id = decodeURIComponent(modelPathMatch[1]);
+        const route = byAlias.get(id);
+        if (route) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(formatAnthropicModelEntry(route.aliasId, route.displayName, route.contextWindow)));
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: { type: "not_found_error", message: `Model '${id}' not found` } }));
+        }
+      } else {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(modelsPayload);
+      }
       return;
     }
     if (req.method === "POST" && req.url?.startsWith("/v1/messages")) {
-      const apiKey = extractApiKey(req);
-      plog(`POST /v1/messages - key=${apiKey ? `len:${apiKey.length}` : "MISSING"}`);
-      if (!apiKey) {
-        anthropicError(res, 401, "Missing API key");
-        return;
-      }
+      const inboundKey = extractApiKey(req);
       let anthropicBody;
       try {
         const raw = await readBody(req);
@@ -2154,14 +2158,38 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
       }
       const originalModel = anthropicBody.model;
       const clientWantsStream = Boolean(anthropicBody.stream);
+      const route = byAlias.get(originalModel) ?? defaultRoute;
+      const apiKey = route.apiKey || inboundKey || "";
+      const upstreamUrl = route.upstreamUrl;
+      plog(
+        () => `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${apiKey ? `len:${apiKey.length}` : "MISSING"}`
+      );
+      if (!apiKey) {
+        anthropicError(res, 401, "Missing API key");
+        return;
+      }
+      if (route.modelFormat === "anthropic") {
+        const forwardBody = { ...anthropicBody, model: route.realModelId };
+        const targetUrl = `${upstreamUrl}/v1/messages`;
+        plog(() => `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}`);
+        try {
+          await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream);
+        } catch (err) {
+          const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
+          plog(() => `anthropic-passthrough error: ${message}`);
+          anthropicError(res, 502, message);
+        }
+        return;
+      }
+      anthropicBody = { ...anthropicBody, model: route.realModelId };
       if (isGeminiUrl(upstreamUrl)) {
-        const nativeUrl = geminiNativeUrl(originalModel, clientWantsStream);
+        const nativeUrl = geminiNativeUrl(route.realModelId, clientWantsStream);
         const geminiBody = translateToGemini(anthropicBody);
         const geminiTools = geminiBody.tools;
         const geminiContents = geminiBody.contents;
         const totalTools2 = anthropicBody.tools?.length ?? 0;
         const upstreamCount = geminiTools?.[0]?.functionDeclarations?.length ?? 0;
-        plog(`gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${upstreamCount}/${totalTools2}, msgs=${geminiContents?.length ?? 0}`);
+        plog(() => `gemini-native: model=${originalModel}, stream=${clientWantsStream}, tools=${upstreamCount}/${totalTools2}, msgs=${geminiContents?.length ?? 0}`);
         let upstreamRes2;
         try {
           upstreamRes2 = await fetch(nativeUrl, {
@@ -2173,14 +2201,14 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
             body: JSON.stringify(geminiBody)
           });
         } catch (err) {
-          plog(`gemini upstream error: ${err instanceof Error ? err.message : String(err)}`);
+          plog(() => `gemini upstream error: ${err instanceof Error ? err.message : String(err)}`);
           anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
-        plog(`gemini upstream ${upstreamRes2.status}`);
+        plog(() => `gemini upstream ${upstreamRes2.status}`);
         if (!upstreamRes2.ok) {
           const errBody = await upstreamRes2.text();
-          plog(`gemini error body: ${errBody.slice(0, 500)}`);
+          plog(() => `gemini error body: ${errBody.slice(0, 500)}`);
           res.writeHead(upstreamRes2.status, { "Content-Type": upstreamRes2.headers.get("content-type") || "application/json" });
           res.end(errBody);
           return;
@@ -2191,7 +2219,7 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
           });
-          const nodeStream = Readable3.fromWeb(upstreamRes2.body);
+          const nodeStream = Readable4.fromWeb(upstreamRes2.body);
           const translated = translateStreamGemini(nodeStream, originalModel);
           translated.pipe(res);
           return;
@@ -2205,14 +2233,14 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
         }
         return;
       }
-      if (isOpenAIChatCompletionsUrl(upstreamUrl) && modelPrefersResponsesApi(originalModel)) {
+      if (isOpenAIChatCompletionsUrl(upstreamUrl) && modelPrefersResponsesApi(route.realModelId)) {
         const responsesUrl = openAIResponsesUrl(upstreamUrl);
         const responsesBody = translateToResponses(anthropicBody);
         const responsesInput = responsesBody.input;
         const responsesTools = responsesBody.tools;
         const totalTools2 = anthropicBody.tools?.length ?? 0;
         plog(
-          `openai-responses: model=${originalModel}, stream=${clientWantsStream}, tools=${responsesTools?.length ?? 0}/${totalTools2}, msgs=${responsesInput?.length ?? 0}`
+          () => `openai-responses: model=${originalModel}, stream=${clientWantsStream}, tools=${responsesTools?.length ?? 0}/${totalTools2}, msgs=${responsesInput?.length ?? 0}`
         );
         let upstreamRes2;
         try {
@@ -2226,14 +2254,14 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
             body: JSON.stringify(responsesBody)
           });
         } catch (err) {
-          plog(`openai-responses upstream error: ${err instanceof Error ? err.message : String(err)}`);
+          plog(() => `openai-responses upstream error: ${err instanceof Error ? err.message : String(err)}`);
           anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
           return;
         }
-        plog(`openai-responses upstream ${upstreamRes2.status} from ${responsesUrl}`);
+        plog(() => `openai-responses upstream ${upstreamRes2.status} from ${responsesUrl}`);
         if (!upstreamRes2.ok) {
           const errBody = await upstreamRes2.text();
-          plog(`openai-responses error body: ${errBody.slice(0, 500)}`);
+          plog(() => `openai-responses error body: ${errBody.slice(0, 500)}`);
           res.writeHead(upstreamRes2.status, { "Content-Type": upstreamRes2.headers.get("content-type") || "application/json" });
           res.end(errBody);
           return;
@@ -2244,7 +2272,7 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
           });
-          const nodeStream = Readable3.fromWeb(upstreamRes2.body);
+          const nodeStream = Readable4.fromWeb(upstreamRes2.body);
           translateStreamResponses(nodeStream, originalModel).pipe(res);
           return;
         }
@@ -2262,13 +2290,13 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
       if (translateOpts.mistralNormalize) {
         const n = translateOpts.mistralNormalize;
         plog(
-          `mistral-normalize: hoisted ${n.hoistedSystemBlocks} system block(s), inserted ${n.insertedAssistantFillers} assistant filler(s)`
+          () => `mistral-normalize: hoisted ${n.hoistedSystemBlocks} system block(s), inserted ${n.insertedAssistantFillers} assistant filler(s)`
         );
       }
       const openaiTools = openaiBody.tools;
       const openaiMessages = openaiBody.messages;
       const totalTools = anthropicBody.tools?.length ?? 0;
-      plog(`openai: tools=${openaiTools?.length ?? 0}/${totalTools}, stream=${openaiBody.stream ?? false}, msgs=${openaiMessages?.length ?? 0}`);
+      plog(() => `openai: tools=${openaiTools?.length ?? 0}/${totalTools}, stream=${openaiBody.stream ?? false}, msgs=${openaiMessages?.length ?? 0}`);
       let upstreamRes;
       try {
         upstreamRes = await fetch(upstreamUrl, {
@@ -2280,14 +2308,14 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
           body: JSON.stringify(openaiBody)
         });
       } catch (err) {
-        plog(`upstream error: ${err instanceof Error ? err.message : String(err)}`);
+        plog(() => `upstream error: ${err instanceof Error ? err.message : String(err)}`);
         anthropicError(res, 502, `Upstream unreachable: ${err instanceof Error ? err.message : String(err)}`);
         return;
       }
-      plog(`upstream ${upstreamRes.status} from ${upstreamUrl}`);
+      plog(() => `upstream ${upstreamRes.status} from ${upstreamUrl}`);
       if (!upstreamRes.ok) {
         const errBody = await upstreamRes.text();
-        plog(`upstream error body: ${errBody.slice(0, 500)}`);
+        plog(() => `upstream error body: ${errBody.slice(0, 500)}`);
         res.writeHead(upstreamRes.status, { "Content-Type": upstreamRes.headers.get("content-type") || "application/json" });
         res.end(errBody);
         return;
@@ -2298,7 +2326,7 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
           "Cache-Control": "no-cache",
           "Connection": "keep-alive"
         });
-        const nodeStream = Readable3.fromWeb(upstreamRes.body);
+        const nodeStream = Readable4.fromWeb(upstreamRes.body);
         const translated = translateStream(nodeStream, originalModel);
         translated.pipe(res);
         return;
@@ -2318,13 +2346,71 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
         reject(new Error("Failed to bind proxy"));
         return;
       }
-      plog(`started on port ${addr.port}, forwarding to ${upstreamUrl}`);
+      plog(() => `started on port ${addr.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`);
       resolve({
         port: addr.port,
         close: () => server.close()
       });
     });
   });
+}
+function startProxy(completionsUrl, modelId, debug = false, contextWindow) {
+  return startProxyCatalog([{
+    aliasId: modelId,
+    realModelId: modelId,
+    displayName: modelId,
+    upstreamUrl: completionsUrl,
+    apiKey: "",
+    // '' → use inbound bearer from Claude Code (single-model compat)
+    modelFormat: "openai",
+    contextWindow
+  }], modelId, debug);
+}
+
+// src/catalog.ts
+function localModelToRoute(lp, model) {
+  if (!model.completionsUrl && !model.baseUrl) return null;
+  return {
+    aliasId: aliasModelId(model.id, lp.name),
+    realModelId: model.id,
+    displayName: `${model.name || model.id} (${lp.name})`,
+    upstreamUrl: (model.modelFormat === "anthropic" ? model.baseUrl : model.completionsUrl) ?? "",
+    apiKey: lp.apiKey,
+    modelFormat: model.modelFormat,
+    contextWindow: model.contextWindow
+  };
+}
+function zenGoModelToRoute(model, apiKey) {
+  if (model.modelFormat === "unsupported") return null;
+  const backend = BACKENDS[model.sourceBackend];
+  return {
+    aliasId: aliasModelId(model.id, backend.name),
+    realModelId: model.id,
+    displayName: `${model.name} (${backend.name})`,
+    upstreamUrl: model.modelFormat === "anthropic" ? backend.baseUrl : `${backend.baseUrl}/v1/chat/completions`,
+    apiKey,
+    modelFormat: model.modelFormat,
+    contextWindow: model.contextWindow
+  };
+}
+function makeRouteResolver(localProviders, zenModels, goModels, zenGoApiKey) {
+  return (providerId, modelId) => {
+    if (providerId === "zen" || providerId === "go") {
+      if (!zenGoApiKey) return void 0;
+      const model2 = (providerId === "zen" ? zenModels : goModels).find((m) => m.id === modelId);
+      return model2 ? zenGoModelToRoute(model2, zenGoApiKey) ?? void 0 : void 0;
+    }
+    const provider = localProviders?.find((lp) => lp.id === providerId);
+    const model = provider?.models.find((m) => m.id === modelId);
+    return provider && model ? localModelToRoute(provider, model) ?? void 0 : void 0;
+  };
+}
+function buildCatalogRoutes(startingRoute, favorites, resolveRoute, max = MAX_MODEL_CATALOG) {
+  const tail = favorites.map((fav) => resolveRoute(fav.providerId, fav.modelId)).filter((route) => route !== void 0);
+  return [
+    startingRoute,
+    ...tail.filter((route) => route.aliasId !== startingRoute.aliasId)
+  ].slice(0, max);
 }
 
 // src/server/index.ts
@@ -2402,6 +2488,7 @@ function loadPreferences() {
     lastModel: config.lastModel,
     lastProvider: config.lastProvider,
     recentModelsByProvider: config.recentModelsByProvider,
+    favoriteModels: config.favoriteModels,
     subscriptionTier: config.subscriptionTier,
     modelListCache: config.modelListCache,
     server: config.server
@@ -2413,6 +2500,7 @@ function savePreferences(prefs) {
   if (prefs.lastModel !== void 0) config.lastModel = prefs.lastModel;
   if (prefs.lastProvider !== void 0) config.lastProvider = prefs.lastProvider;
   if (prefs.recentModelsByProvider !== void 0) config.recentModelsByProvider = prefs.recentModelsByProvider;
+  if (prefs.favoriteModels !== void 0) config.favoriteModels = prefs.favoriteModels;
   writeConfig(config);
 }
 function getCachedModels(backendId) {
@@ -2449,6 +2537,113 @@ function setSavedServerPassword(password2) {
     savedPassword: password2
   };
   writeConfig(config);
+}
+
+// src/models.ts
+var BRAND_MAP = [
+  ["claude", "Claude"],
+  ["gpt", "GPT"],
+  ["gemini", "Gemini"],
+  ["deepseek", "DeepSeek"],
+  ["qwen", "Qwen"],
+  ["minimax", "MiniMax"],
+  ["kimi", "Kimi"],
+  ["glm", "GLM"],
+  ["mimo", "MiMo"],
+  ["grok", "Grok"],
+  ["nemotron", "Nemotron"]
+];
+function deriveBrand(family) {
+  const lower = family.toLowerCase();
+  for (const [prefix, brand] of BRAND_MAP) {
+    if (lower.startsWith(prefix)) return brand;
+  }
+  return "Other";
+}
+function readModelsFromCache(backendId) {
+  const cache = loadOpencodeCache();
+  if (!cache) return null;
+  const providerKey = backendId === "zen" ? "opencode" : "opencode-go";
+  const providerData = cache[providerKey];
+  if (!providerData?.models) return null;
+  const result = /* @__PURE__ */ new Map();
+  for (const entry of Object.values(providerData.models)) {
+    if (!entry.id || entry.status === "deprecated") continue;
+    const isFree = entry.cost !== void 0 && entry.cost.input === 0 && entry.cost.output === 0;
+    const modelFormat = classifyModelFormat(entry.id, entry.provider?.npm);
+    result.set(entry.id, {
+      id: entry.id,
+      name: entry.name ?? entry.id,
+      isFree,
+      brand: deriveBrand(entry.family ?? ""),
+      sourceBackend: backendId,
+      modelFormat,
+      cost: entry.cost,
+      contextWindow: resolveContextWindow(entry.id, entry.limit?.context)
+    });
+  }
+  return result;
+}
+async function fetchModelsFromApi(backend) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5e3);
+  try {
+    const res = await fetch(`${backend.baseUrl}/v1/models`, {
+      signal: controller.signal,
+      headers: { Authorization: "Bearer test" }
+    });
+    if (!res.ok) throw new Error(`API returned HTTP ${res.status}`);
+    const body = await res.json();
+    return body.data.map((m) => m.id);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function mergeModels(apiIds, cache, backendId) {
+  return apiIds.filter((id) => !STALE_FREE_MODELS.has(id)).map((id) => {
+    const cached = cache?.get(id);
+    if (cached) return { ...cached, sourceBackend: backendId };
+    const modelFormat = classifyModelFormat(id, void 0);
+    return {
+      id,
+      name: id,
+      isFree: false,
+      brand: "Other",
+      sourceBackend: backendId,
+      modelFormat,
+      contextWindow: resolveContextWindow(id)
+    };
+  });
+}
+function groupModels(models) {
+  const free = models.filter((m) => m.isFree).sort((a, b) => a.id.localeCompare(b.id));
+  const byBrand = /* @__PURE__ */ new Map();
+  for (const m of models.filter((m2) => !m2.isFree)) {
+    const list = byBrand.get(m.brand) ?? [];
+    list.push(m);
+    byBrand.set(m.brand, list);
+  }
+  for (const [brand, list] of byBrand) {
+    byBrand.set(brand, list.sort((a, b) => a.id.localeCompare(b.id)));
+  }
+  return { free, byBrand };
+}
+async function getModels(backend, fallbackModels) {
+  const cache = readModelsFromCache(backend.id);
+  try {
+    const apiIds = await fetchModelsFromApi(backend);
+    return { models: mergeModels(apiIds, cache, backend.id), fromCache: false };
+  } catch {
+    if (cache && cache.size > 0) {
+      return { models: [...cache.values()], fromCache: true };
+    }
+    if (fallbackModels && fallbackModels.length > 0) {
+      return { models: fallbackModels, fromCache: true };
+    }
+    throw new Error(
+      "Cannot fetch models. Check your network and https://opencode.ai status."
+    );
+  }
 }
 
 // src/providers.ts
@@ -2622,6 +2817,81 @@ async function fetchLocalProviders() {
   });
 }
 
+// src/provider-catalog.ts
+async function fetchZenGoModels(backends, persistCache = false) {
+  const results = await Promise.all(
+    backends.map(async (id) => {
+      const result = await getModels(BACKENDS[id], getCachedModels(id) ?? void 0);
+      if (!result.fromCache && persistCache) setCachedModels(id, result.models);
+      return { id, models: result.models };
+    })
+  );
+  let zenModels = [];
+  let goModels = [];
+  for (const entry of results) {
+    if (entry.id === "zen") zenModels = entry.models;
+    else goModels = entry.models;
+  }
+  return { zenModels, goModels };
+}
+async function fetchProviderCatalog(opts) {
+  const persistCache = opts?.persistCache ?? false;
+  const [localProviders, zenGo] = await Promise.all([
+    fetchLocalProviders().then((providers) => providers ?? []),
+    fetchZenGoModels(["zen", "go"], persistCache)
+  ]);
+  return {
+    localProviders,
+    zenModels: zenGo.zenModels,
+    goModels: zenGo.goModels
+  };
+}
+function zenGoAsLocalProvider(backendId, models) {
+  const name = backendId === "zen" ? "OpenCode Zen" : "OpenCode Go";
+  return {
+    id: backendId,
+    name,
+    apiKey: "",
+    models: models.filter((m) => m.modelFormat !== "unsupported").map((m) => ({
+      id: m.id,
+      name: m.name,
+      family: m.brand,
+      brand: m.brand,
+      modelFormat: m.modelFormat,
+      contextWindow: m.contextWindow,
+      cost: m.cost
+    }))
+  };
+}
+function providersForPicker(catalog) {
+  return [
+    ...catalog.zenModels.length > 0 ? [zenGoAsLocalProvider("zen", catalog.zenModels)] : [],
+    ...catalog.goModels.length > 0 ? [zenGoAsLocalProvider("go", catalog.goModels)] : [],
+    ...catalog.localProviders
+  ];
+}
+function localProvidersToServerModels(localProviders) {
+  const models = [];
+  for (const provider of localProviders) {
+    for (const model of provider.models) {
+      models.push({
+        id: model.id,
+        name: model.name,
+        isFree: false,
+        brand: model.brand,
+        sourceBackend: "zen",
+        modelFormat: model.modelFormat,
+        cost: model.cost,
+        baseUrl: model.baseUrl,
+        completionsUrl: model.completionsUrl,
+        apiKey: provider.apiKey,
+        contextWindow: model.contextWindow
+      });
+    }
+  }
+  return models;
+}
+
 // src/server/prompts.ts
 import * as p from "@clack/prompts";
 async function askListenMode() {
@@ -2698,7 +2968,7 @@ function extractBearerToken(value) {
 }
 
 // src/server/router.ts
-import { Readable as Readable4 } from "stream";
+import { Readable as Readable5 } from "stream";
 async function startServer(options) {
   const server = createServer2((req, res) => {
     void routeRequest(req, res, options);
@@ -2804,7 +3074,7 @@ async function handleAnthropicMessages(req, res, options) {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive"
       });
-      const nodeStream = Readable4.fromWeb(upstreamRes.body);
+      const nodeStream = Readable5.fromWeb(upstreamRes.body);
       const translated = useResponses ? translateStreamResponses(nodeStream, body.model) : translateStream(nodeStream, body.model);
       translated.pipe(res);
       return;
@@ -2855,22 +3125,8 @@ function backendFor(options, model) {
   return options.backends[model.sourceBackend];
 }
 async function forwardJson(res, url, body, apiKey) {
-  const upstream = await postJson(url, body, apiKey);
+  const upstream = await postJsonUpstream(url, body, apiKey);
   sendJson2(res, upstream.status, upstream.body);
-}
-async function postJson(url, body, apiKey) {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      "X-API-Key": apiKey
-    },
-    body: JSON.stringify(body)
-  });
-  const text3 = await response.text();
-  const parsed = text3 ? JSON.parse(text3) : null;
-  return { status: response.status, body: parsed };
 }
 async function readJson(req) {
   try {
@@ -2952,38 +3208,18 @@ async function loadServerModels(tier) {
   const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
   const needsGo = tier === "go" || tier === "both";
   const models = [];
-  if (needsZen) {
-    const result = await getModels(BACKENDS.zen, getCachedModels("zen") ?? void 0);
-    if (!result.fromCache) setCachedModels("zen", result.models);
-    models.push(...modelsForTier(tier, "zen", result.models));
-  }
-  if (needsGo) {
-    const result = await getModels(BACKENDS.go, getCachedModels("go") ?? void 0);
-    if (!result.fromCache) setCachedModels("go", result.models);
-    models.push(...modelsForTier(tier, "go", result.models));
+  const zenGoBackends = [];
+  if (needsZen) zenGoBackends.push("zen");
+  if (needsGo) zenGoBackends.push("go");
+  if (zenGoBackends.length > 0) {
+    const zenGo = await fetchZenGoModels(zenGoBackends, true);
+    if (needsZen) models.push(...modelsForTier(tier, "zen", zenGo.zenModels));
+    if (needsGo) models.push(...modelsForTier(tier, "go", zenGo.goModels));
   }
   try {
     const localProviders = await fetchLocalProviders();
     if (localProviders !== null) {
-      for (const provider of localProviders) {
-        for (const model of provider.models) {
-          models.push({
-            id: model.id,
-            name: model.name,
-            isFree: false,
-            brand: model.brand,
-            sourceBackend: "zen",
-            // fallback; won't be used when per-model routing fields are set
-            modelFormat: model.modelFormat,
-            cost: model.cost,
-            baseUrl: model.baseUrl,
-            completionsUrl: model.completionsUrl,
-            apiKey: provider.apiKey,
-            // routing only — never logged or returned in API responses
-            contextWindow: model.contextWindow
-          });
-        }
-      }
+      models.push(...localProvidersToServerModels(localProviders));
     } else {
       p2.log.info("No local providers found \u2014 using cloud models only");
     }
@@ -2995,7 +3231,9 @@ async function loadServerModels(tier) {
 async function runServerCommand() {
   let apiKey = resolveApiKey();
   if (!apiKey) {
-    apiKey = await readFromCredentialStore();
+    apiKey = await readFromCredentialStore((reason) => {
+      p2.log.warn(`Credential store unavailable \u2014 ${reason}`);
+    });
     if (apiKey) {
       const isMac = process.platform === "darwin";
       const isWindows3 = process.platform === "win32";
@@ -3110,6 +3348,195 @@ async function askSubscriptionTier() {
 }
 var BROWSE_ALL = "__browse_all__";
 var MAX_RECENT = 3;
+var MODEL_SEARCH_THRESHOLD = 25;
+var MODEL_PAGE_SIZE = 15;
+var PAGE_PREV = "__page_prev__";
+var PAGE_NEXT = "__page_next__";
+var SWITCH_SEARCH = "__switch_search__";
+var SWITCH_BROWSE = "__switch_browse__";
+var MODE_SEARCH = "search";
+var MODE_BROWSE = "browse";
+function sortModelsByBrand(models) {
+  return [...models].sort((a, b) => {
+    const brandCmp = a.brand.localeCompare(b.brand);
+    return brandCmp !== 0 ? brandCmp : a.id.localeCompare(b.id);
+  });
+}
+function filterModelsBySearch(models, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  return models.filter(
+    (m) => m.id.toLowerCase().includes(q) || m.name.toLowerCase().includes(q) || m.brand.toLowerCase().includes(q)
+  );
+}
+function sliceModelPage(items, page, pageSize = MODEL_PAGE_SIZE) {
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const clampedPage = Math.min(Math.max(0, page), totalPages - 1);
+  const start = clampedPage * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    page: clampedPage,
+    totalPages
+  };
+}
+function isSelectedModel(value) {
+  return value !== "search" && value !== "browse" && value !== "menu";
+}
+async function pickModelFromPagedList(list, toOption, messagePrefix, initialModelId, links) {
+  let page = 0;
+  if (initialModelId) {
+    const idx = list.findIndex((m) => m.id === initialModelId);
+    if (idx >= 0) page = Math.floor(idx / MODEL_PAGE_SIZE);
+  }
+  while (true) {
+    const { items: pageItems, page: currentPage, totalPages } = sliceModelPage(list, page);
+    const options = [];
+    if (currentPage > 0) {
+      options.push({
+        value: PAGE_PREV,
+        label: "\u2190 Previous page",
+        hint: `Page ${currentPage} of ${totalPages}`
+      });
+    }
+    options.push(...pageItems.map(toOption));
+    if (currentPage < totalPages - 1) {
+      options.push({
+        value: PAGE_NEXT,
+        label: "Next page \u2192",
+        hint: `Page ${currentPage + 2} of ${totalPages}`
+      });
+    }
+    if (links?.search) {
+      options.push({ value: SWITCH_SEARCH, label: "Search instead \u2192", hint: "" });
+    }
+    if (links?.browse) {
+      options.push({ value: SWITCH_BROWSE, label: "Browse all instead \u2192", hint: "" });
+    }
+    if (links?.newSearch) {
+      options.push({ value: SWITCH_SEARCH, label: "\u2190 New search", hint: "" });
+    }
+    const initialValue = (initialModelId && pageItems.some((m) => m.id === initialModelId) ? initialModelId : pageItems[0]?.id) ?? options[0]?.value;
+    const picked = await p3.select({
+      message: `${messagePrefix} (page ${currentPage + 1} of ${totalPages})`,
+      options,
+      initialValue
+    });
+    if (p3.isCancel(picked)) return "menu";
+    const choice = String(picked);
+    if (choice === PAGE_PREV) {
+      page = currentPage - 1;
+      continue;
+    }
+    if (choice === PAGE_NEXT) {
+      page = currentPage + 1;
+      continue;
+    }
+    if (choice === SWITCH_SEARCH) return "search";
+    if (choice === SWITCH_BROWSE) return "browse";
+    const selected = list.find((m) => m.id === choice);
+    if (selected) return selected;
+    continue;
+  }
+}
+async function selectLargeCatalog(models, browseList, toOption, message, initialModelId) {
+  let mode = "choose";
+  while (true) {
+    if (mode === "choose") {
+      const method = await p3.select({
+        message: `${message} (${models.length} available)`,
+        options: [
+          { value: MODE_SEARCH, label: "Search models", hint: "Filter by name, id, or brand" },
+          {
+            value: MODE_BROWSE,
+            label: "Browse all models",
+            hint: `${MODEL_PAGE_SIZE} per page \xB7 ${Math.ceil(browseList.length / MODEL_PAGE_SIZE)} pages`
+          }
+        ]
+      });
+      if (p3.isCancel(method)) {
+        p3.cancel("Cancelled.");
+        return null;
+      }
+      mode = method === MODE_BROWSE ? "browse" : "search";
+      continue;
+    }
+    if (mode === "browse") {
+      const picked = await pickModelFromPagedList(
+        browseList,
+        toOption,
+        message,
+        initialModelId,
+        { search: true }
+      );
+      if (picked === "search") {
+        mode = "search";
+        continue;
+      }
+      if (picked === "menu") {
+        mode = "choose";
+        continue;
+      }
+      if (isSelectedModel(picked)) return picked;
+      continue;
+    }
+    const searchInput = await p3.text({
+      message: `Search models (${models.length} available):`,
+      placeholder: "e.g. claude, sonnet, llama"
+    });
+    if (p3.isCancel(searchInput)) {
+      mode = "choose";
+      continue;
+    }
+    const matched = filterModelsBySearch(browseList, String(searchInput));
+    if (matched.length === 0) {
+      p3.log.warn("No models match \u2014 try a different search");
+      continue;
+    }
+    const result = await pickModelFromPagedList(
+      matched,
+      toOption,
+      matched.length === 1 ? "Match found" : `Select model (${matched.length} matches)`,
+      initialModelId,
+      { browse: true, newSearch: true }
+    );
+    if (result === "search") continue;
+    if (result === "browse") {
+      mode = "browse";
+      continue;
+    }
+    if (result === "menu") {
+      mode = "choose";
+      continue;
+    }
+    if (isSelectedModel(result)) return result;
+  }
+}
+async function selectModelWithSearch(models, toOption, message, initialModelId, browseList) {
+  if (models.length === 0) return null;
+  const orderedBrowse = browseList ?? sortModelsByBrand(models);
+  if (models.length <= MODEL_SEARCH_THRESHOLD) {
+    const options = models.map(toOption);
+    const initialValue = initialModelId && options.some((o) => o.value === initialModelId) ? initialModelId : options[0]?.value;
+    const picked = await p3.select({
+      message,
+      options,
+      initialValue
+    });
+    if (p3.isCancel(picked)) {
+      p3.cancel("Cancelled.");
+      return null;
+    }
+    const selected = models.find((m) => m.id === String(picked));
+    if (!selected) return null;
+    return selected;
+  }
+  return selectLargeCatalog(models, orderedBrowse, toOption, message, initialModelId);
+}
+function noteEnvConflicts(conflicts) {
+  if (conflicts.length === 0) return;
+  const lines = conflicts.map((c) => `  ${pc2.dim(c.name)}=${pc2.dim(c.value)}`).join("\n");
+  p3.note(lines, pc2.yellow("Env vars that will be temporarily overridden:"));
+}
 function modelToOption(model, hint) {
   return {
     value: model.id,
@@ -3118,52 +3545,12 @@ function modelToOption(model, hint) {
   };
 }
 async function browseAllModels(provider, prefs) {
-  let filteredModels;
-  if (provider.models.length > 10) {
-    const filterInput = await p3.text({
-      message: "Filter models (leave blank for all):"
-    });
-    if (p3.isCancel(filterInput)) {
-      p3.cancel("Cancelled.");
-      return null;
-    }
-    const filterStr = filterInput.trim().toLowerCase();
-    if (filterStr) {
-      const matched = provider.models.filter(
-        (m) => m.id.toLowerCase().includes(filterStr) || m.name.toLowerCase().includes(filterStr) || m.brand.toLowerCase().includes(filterStr)
-      );
-      if (matched.length === 0) {
-        p3.log.warn("No models match that filter \u2014 showing all");
-        filteredModels = provider.models;
-      } else {
-        filteredModels = matched;
-      }
-    } else {
-      filteredModels = provider.models;
-    }
-  } else {
-    filteredModels = provider.models;
-  }
-  filteredModels = [...filteredModels].sort((a, b) => {
-    const brandCmp = a.brand.localeCompare(b.brand);
-    return brandCmp !== 0 ? brandCmp : a.id.localeCompare(b.id);
-  });
-  const options = filteredModels.map((m) => modelToOption(m));
-  if (options.length === 0) {
-    p3.cancel("No models available for this provider.");
-    return null;
-  }
-  const defaultModel = prefs.lastModel && options.some((o) => o.value === prefs.lastModel) ? prefs.lastModel : options[0]?.value;
-  const modelId = await p3.select({
-    message: "Which model?",
-    options,
-    initialValue: defaultModel
-  });
-  if (p3.isCancel(modelId)) {
-    p3.cancel("Cancelled.");
-    return null;
-  }
-  return filteredModels.find((m) => m.id === String(modelId));
+  return selectModelWithSearch(
+    provider.models,
+    (m) => modelToOption(m),
+    "Which model?",
+    prefs.lastModel
+  );
 }
 async function pickLocalModel(provider, conflicts, prefs) {
   const recentIds = (prefs.recentModelsByProvider?.[provider.id] ?? []).slice(0, MAX_RECENT);
@@ -3195,10 +3582,7 @@ async function pickLocalModel(provider, conflicts, prefs) {
     if (!browsed) return null;
     selectedModel = browsed;
   }
-  if (conflicts.length > 0) {
-    const lines = conflicts.map((c) => `  ${pc2.dim(c.name)}=${pc2.dim(c.value)}`).join("\n");
-    p3.note(lines, pc2.yellow("Env vars that will be temporarily overridden:"));
-  }
+  noteEnvConflicts(conflicts);
   const confirmed = await p3.confirm({
     message: `Launch Claude Code \xB7 ${pc2.bold(selectedModel.id)} via ${pc2.bold(provider.name)}?`,
     initialValue: true
@@ -3245,33 +3629,26 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
     (m.modelFormat === "unsupported" ? unsupportedModels : selectableModels).push(m);
   }
   const { free, byBrand } = groupModels(selectableModels);
-  const options = [];
-  for (const m of free) {
-    options.push({ value: m.id, label: modelLabel(m, showBackendBadge), hint: modelHint(m) });
-  }
   const brandOrder = ["Claude", "GPT", "Gemini", "DeepSeek", "Qwen", "MiniMax", "Kimi", "GLM", "MiMo", "Grok", "Nemotron", "Other"];
   const sortedBrands = [...byBrand.keys()].sort(
     (a, b) => (brandOrder.indexOf(a) !== -1 ? brandOrder.indexOf(a) : 99) - (brandOrder.indexOf(b) !== -1 ? brandOrder.indexOf(b) : 99)
   );
-  for (const brand of sortedBrands) {
-    for (const m of byBrand.get(brand) ?? []) {
-      options.push({ value: m.id, label: modelLabel(m), hint: modelHint(m) });
-    }
-  }
-  if (options.length === 0) {
+  const orderedSelectable = [
+    ...free,
+    ...sortedBrands.flatMap((brand) => byBrand.get(brand) ?? [])
+  ];
+  if (orderedSelectable.length === 0) {
     p3.cancel("No models available for this backend and subscription tier.");
     return null;
   }
-  const defaultModel = prefs.lastModel && options.some((o) => o.value === prefs.lastModel) ? prefs.lastModel : options[0]?.value;
-  const modelId = await p3.select({
-    message: "Which model?",
-    options,
-    initialValue: defaultModel
-  });
-  if (p3.isCancel(modelId)) {
-    p3.cancel("Cancelled.");
-    return null;
-  }
+  const selectedModel = await selectModelWithSearch(
+    orderedSelectable,
+    (m) => ({ value: m.id, label: modelLabel(m, showBackendBadge), hint: modelHint(m) }),
+    "Which model?",
+    prefs.lastModel,
+    orderedSelectable
+  );
+  if (!selectedModel) return null;
   if (unsupportedModels.length > 0) {
     const brandCounts = unsupportedModels.reduce((acc, m) => {
       acc[m.brand] = (acc[m.brand] ?? 0) + 1;
@@ -3280,14 +3657,10 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
     const summary = Object.entries(brandCounts).map(([b, c]) => `${b} (${c})`).join(", ");
     p3.log.info(pc2.dim(`Not yet supported: ${summary} \u2014 need API format translation`));
   }
-  const selectedModel = selectableModels.find((m) => m.id === String(modelId));
   const backend = BACKENDS[selectedModel.sourceBackend];
-  if (conflicts.length > 0) {
-    const lines = conflicts.map((c) => `  ${pc2.dim(c.name)}=${pc2.dim(c.value)}`).join("\n");
-    p3.note(lines, pc2.yellow("Env vars that will be temporarily overridden:"));
-  }
+  noteEnvConflicts(conflicts);
   const confirmed = await p3.confirm({
-    message: `Launch Claude Code \xB7 ${pc2.bold(String(modelId))} via ${pc2.bold(backend.name)}?`,
+    message: `Launch Claude Code \xB7 ${pc2.bold(selectedModel.id)} via ${pc2.bold(backend.name)}?`,
     initialValue: true
   });
   if (p3.isCancel(confirmed) || !confirmed) {
@@ -3296,6 +3669,19 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
   }
   p3.outro(pc2.green("Launching..."));
   return { backend, model: selectedModel };
+}
+
+// src/favorites.ts
+function isFavorite(list, fav) {
+  return list.some((f) => f.providerId === fav.providerId && f.modelId === fav.modelId);
+}
+function addFavorite(list, fav, max = MAX_MODEL_CATALOG) {
+  if (isFavorite(list, fav)) return { ok: false, reason: "duplicate" };
+  if (list.length >= max) return { ok: false, reason: "cap" };
+  return { ok: true, list: [...list, fav] };
+}
+function removeFavorite(list, fav) {
+  return list.filter((f) => !(f.providerId === fav.providerId && f.modelId === fav.modelId));
 }
 
 // src/cli.ts
@@ -3326,6 +3712,15 @@ function parseArgs(args) {
       if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
       else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
       else if (!parsed2.error) parsed2.error = `Unknown server option: ${arg}`;
+    }
+    return parsed2;
+  }
+  if (first === "models") {
+    const parsed2 = emptyParsed("models");
+    for (const arg of rest) {
+      if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
+      else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
+      else if (!parsed2.error) parsed2.error = `Unknown models option: ${arg}`;
     }
     return parsed2;
   }
@@ -3366,6 +3761,7 @@ ${pc3.bold("Usage:")}
 
 ${pc3.bold("Commands:")}
   claude      Launch Claude Code through OpenCode Starter
+  models      Manage your favorite models for mid-session switching
   server      Run a foreground OpenCode Starter API gateway
   codex       planned
 
@@ -3425,10 +3821,57 @@ ${pc3.bold("Behavior:")}
   Server password is saved only if the user chooses to save it.
   Server host and port are not saved.`;
 }
+function modelsHelpText() {
+  return `${pc3.bold("opencode-starter models")} v${VERSION}
+Manage your favorite models for mid-session switching.
+
+${pc3.bold("Usage:")}
+  opencode-starter models
+  opencode-starter models --help
+  opencode-starter models --version
+
+${pc3.bold("Behavior:")}
+  Opens an interactive manager to add or remove favorite models.
+  Favorites are saved to ~/.opencode-starter/config.json.
+  Capped at ${MAX_MODEL_CATALOG} favorites.
+
+${pc3.bold("How it works:")}
+  When you have favorites set, running "opencode-starter claude" automatically
+  starts a multi-model proxy. Claude Code's /model command shows your favorites,
+  letting you switch models live without restarting.
+  With no favorites, launch behaves exactly as today (single model).`;
+}
 function printHelp(text3) {
   console.log(`
 ${text3}
 `);
+}
+async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindow, trace, claudeArgs) {
+  let proxyHandle;
+  try {
+    proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
+    p4.log.info(
+      `Switch menu active \u2014 proxy on port ${proxyHandle.port} ` + pc3.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? "s" : ""} in /model)`)
+    );
+  } catch (err) {
+    p4.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  const childEnv = buildChildEnv(
+    `http://127.0.0.1:${proxyHandle.port}`,
+    startingRoute.aliasId,
+    "catalog-proxy",
+    proxyHandle.port,
+    contextWindow,
+    true
+  );
+  const debugLogPath = join5(tmpdir(), "opencode-starter-debug.log");
+  const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
+  if (trace) p4.log.info(`Debug log: ${debugLogPath}`);
+  const exitCode = await launchClaude(childEnv, startingRoute.aliasId, [...traceArgs, ...claudeArgs]);
+  proxyHandle.close();
+  if (trace) printTraceLog(debugLogPath);
+  return exitCode;
 }
 function printTraceLog(debugLogPath) {
   if (!existsSync4(debugLogPath)) return;
@@ -3497,7 +3940,7 @@ function detectShellProfile() {
   if (shell.includes("bash")) return { display: "~/.bashrc", path: `${homedir5()}/.bashrc` };
   return { display: "~/.profile", path: `${homedir5()}/.profile` };
 }
-async function resolveOrCollectApiKey(simulate = false) {
+async function resolveOrCollectApiKey(simulate = false, trace = false) {
   if (!simulate) {
     const existing = resolveApiKey();
     if (existing) return existing;
@@ -3512,7 +3955,20 @@ async function resolveOrCollectApiKey(simulate = false) {
     );
   }
   if (!simulate) {
-    const storedKey = await readFromCredentialStore();
+    const keyDiag = (reason) => {
+      p4.log.warn(`Credential store unavailable \u2014 ${reason}`);
+      if (trace) {
+        try {
+          appendFileSync2(
+            join5(tmpdir(), "opencode-starter-debug.log"),
+            `${(/* @__PURE__ */ new Date()).toISOString()} keyring: ${reason}
+`
+          );
+        } catch {
+        }
+      }
+    };
+    const storedKey = await readFromCredentialStore(keyDiag);
     if (storedKey) {
       const storeName = isMac ? "macOS Keychain" : isWindows3 ? "Windows Credential Manager" : "Secret Service";
       p4.log.success(`Found key in ${storeName}`);
@@ -3683,6 +4139,99 @@ export OPENCODE_API_KEY='${escapedKey}'
   if (!simulate) process.env["OPENCODE_API_KEY"] = trimmedKey;
   return trimmedKey;
 }
+async function runModelsCommand() {
+  p4.intro(pc3.bold("  OpenCode Starter \u2014 Favorite Models"));
+  const spinner3 = p4.spinner();
+  spinner3.start("Loading providers...");
+  const catalog = await fetchProviderCatalog();
+  spinner3.stop("");
+  const allProviders = providersForPicker(catalog);
+  if (allProviders.length === 0) {
+    p4.log.warn("No providers found.");
+    p4.log.info("OpenCode Zen/Go is always available. Local providers appear when OpenCode is running.");
+    p4.outro("Done.");
+    return 0;
+  }
+  const modelLookup = /* @__PURE__ */ new Map();
+  for (const ap of allProviders) {
+    for (const m of ap.models) {
+      modelLookup.set(`${ap.id}:${m.id}`, { modelName: m.name || m.id, providerName: ap.name });
+    }
+  }
+  const prefs = loadPreferences();
+  let favorites = prefs.favoriteModels ?? [];
+  let favoritesDirty = false;
+  while (true) {
+    const options = [];
+    for (let i = 0; i < favorites.length; i++) {
+      const fav = favorites[i];
+      const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
+      const label = entry ? `\u2605 ${entry.modelName} (${entry.providerName})` : pc3.dim(`\u2605 ${fav.modelId} \u2014 provider gone`);
+      options.push({ value: `fav-${i}`, label, hint: "select to remove" });
+    }
+    const atCap = favorites.length >= MAX_MODEL_CATALOG;
+    options.push({
+      value: "__add__",
+      label: atCap ? pc3.dim(`+ Add a model \u2192 (limit of ${MAX_MODEL_CATALOG} reached)`) : "+ Add a model \u2192",
+      hint: atCap ? "Remove a favorite first to make room" : `${allProviders.length} provider${allProviders.length !== 1 ? "s" : ""} available`
+    });
+    options.push({ value: "__done__", label: "Done", hint: "" });
+    const header = favorites.length === 0 ? `Favorites (0/${MAX_MODEL_CATALOG})` : `Favorites (${favorites.length}/${MAX_MODEL_CATALOG}) \u2014 select to remove`;
+    const choice = await p4.select({
+      message: header,
+      options,
+      initialValue: "__done__"
+    });
+    if (p4.isCancel(choice) || choice === "__done__") break;
+    if (choice === "__add__") {
+      if (atCap) {
+        p4.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+        continue;
+      }
+      const providerOptions = allProviders.map((ap) => ({
+        value: ap.id,
+        label: ap.name,
+        hint: `${ap.models.length} model${ap.models.length !== 1 ? "s" : ""}`
+      }));
+      const pickedProviderId = await p4.select({
+        message: "Which provider?",
+        options: providerOptions
+      });
+      if (p4.isCancel(pickedProviderId)) continue;
+      const provider = allProviders.find((ap) => ap.id === pickedProviderId);
+      const browsed = await browseAllModels(provider, prefs);
+      if (!browsed) continue;
+      const fav = { providerId: provider.id, modelId: browsed.id };
+      const result = addFavorite(favorites, fav);
+      if (!result.ok) {
+        if (result.reason === "duplicate") {
+          p4.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
+        } else {
+          p4.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+        }
+        continue;
+      }
+      favorites = result.list;
+      favoritesDirty = true;
+      p4.log.success(`Added ${browsed.name || browsed.id} (${provider.name}) to favorites.`);
+    } else if (choice.startsWith("fav-")) {
+      const idx = parseInt(choice.slice(4), 10);
+      const fav = favorites[idx];
+      const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
+      const label = entry ? `${entry.modelName} (${entry.providerName})` : fav.modelId;
+      favorites = removeFavorite(favorites, fav);
+      favoritesDirty = true;
+      p4.log.success(`Removed ${label} from favorites.`);
+    }
+  }
+  if (favoritesDirty) {
+    savePreferences({ favoriteModels: favorites });
+  }
+  p4.outro(
+    favorites.length === 0 ? "No favorites saved \u2014 launch will use single-model mode." : pc3.green(`${favorites.length} favorite${favorites.length !== 1 ? "s" : ""} saved \u2014 /model menu will show these on next launch.`)
+  );
+  return 0;
+}
 async function runClaudeCommand(parsed) {
   const { dryRun, setup, trace, claudeArgs } = parsed;
   const claudePath = findClaudeBinary();
@@ -3694,7 +4243,32 @@ async function runClaudeCommand(parsed) {
   }
   const prefs = dryRun ? {} : loadPreferences();
   const conflicts = detectConflicts();
+  const favorites = dryRun ? [] : prefs.favoriteModels ?? [];
+  const switchMenuActive = favorites.length > 0;
+  const hasZenGoFavorites = favorites.some((f) => f.providerId === "zen" || f.providerId === "go");
   p4.intro(pc3.bold("  OpenCode Starter"));
+  let earlyEffectiveKey = null;
+  let earlyZenModels = [];
+  let earlyGoModels = [];
+  if (switchMenuActive && hasZenGoFavorites && !dryRun) {
+    const apiKey2 = await resolveOrCollectApiKey(false, trace);
+    if (!apiKey2) return 0;
+    earlyEffectiveKey = apiKey2;
+    const zenGoSpinner = p4.spinner();
+    zenGoSpinner.start("Fetching OpenCode models for switch menu...");
+    try {
+      const backends = [];
+      if (favorites.some((f) => f.providerId === "zen")) backends.push("zen");
+      if (favorites.some((f) => f.providerId === "go")) backends.push("go");
+      const fetched = await fetchZenGoModels(backends, false);
+      earlyZenModels = fetched.zenModels;
+      earlyGoModels = fetched.goModels;
+      zenGoSpinner.stop("");
+    } catch {
+      zenGoSpinner.stop("");
+      p4.log.warn("Could not fetch OpenCode models \u2014 Zen/Go favorites will be skipped from /model catalog");
+    }
+  }
   const providerSpinner = p4.spinner();
   providerSpinner.start("Checking for local providers...");
   const localProviders = await fetchLocalProviders();
@@ -3736,6 +4310,42 @@ async function runClaudeCommand(parsed) {
         lastModel: selectedModel.id,
         recentModelsByProvider: { ...prefs.recentModelsByProvider, [provider.id]: updatedRecent }
       });
+    }
+    if (switchMenuActive) {
+      const resolveRoute = makeRouteResolver(
+        localProviders,
+        earlyZenModels,
+        earlyGoModels,
+        earlyEffectiveKey
+      );
+      const startingRoute = localModelToRoute(provider, selectedModel) ?? resolveRoute(provider.id, selectedModel.id);
+      if (!startingRoute) {
+        p4.log.error("Could not resolve a proxy route for the selected model.");
+        return 1;
+      }
+      const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+      if (dryRun) {
+        const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? "(unknown)";
+        console.log("");
+        console.log(pc3.bold(pc3.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
+        console.log("");
+        console.log(`  ${pc3.bold("Provider:")}      ${provider.name}`);
+        console.log(`  ${pc3.bold("Starting model:")} ${selectedModel.id}`);
+        console.log(`  ${pc3.bold("Endpoint:")}      ${endpoint}`);
+        console.log(`  ${pc3.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
+        catalogRoutes.forEach((r) => console.log(`    ${pc3.dim(r.displayName)}`));
+        console.log("");
+        console.log(pc3.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+        console.log("");
+        return 0;
+      }
+      return launchClaudeViaCatalog(
+        catalogRoutes,
+        startingRoute,
+        selectedModel.contextWindow,
+        trace,
+        claudeArgs
+      );
     }
     if (dryRun) {
       const formatDesc = selectedModel.modelFormat === "anthropic" ? "direct passthrough" : "via translation proxy";
@@ -3791,15 +4401,13 @@ async function runClaudeCommand(parsed) {
     }
     const debugLogPath2 = join5(tmpdir(), "opencode-starter-debug.log");
     const traceArgs2 = trace ? ["--debug-file", debugLogPath2] : [];
-    if (trace) {
-      p4.log.info(`Debug log: ${debugLogPath2}`);
-    }
+    if (trace) p4.log.info(`Debug log: ${debugLogPath2}`);
     const exitCode2 = await launchClaude(childEnv2, selectedModel.id, [...traceArgs2, ...claudeArgs]);
     proxyHandle2?.close();
     if (trace) printTraceLog(debugLogPath2);
     return exitCode2;
   }
-  const apiKey = await resolveOrCollectApiKey(dryRun);
+  const apiKey = earlyEffectiveKey ?? await resolveOrCollectApiKey(dryRun, trace);
   if (!apiKey && !dryRun) return 0;
   const effectiveKey = apiKey ?? "dry-run-placeholder";
   let tier = dryRun ? null : getSubscriptionTier();
@@ -3815,20 +4423,13 @@ async function runClaudeCommand(parsed) {
   let zenModels = [];
   let goModels = [];
   try {
-    if (needsZen) {
-      const cachedZen = getCachedModels("zen") ?? void 0;
-      const result = await getModels(BACKENDS.zen, cachedZen);
-      zenModels = result.models;
-      if (!result.fromCache && !dryRun) setCachedModels("zen", zenModels);
-    }
-    if (needsGo) {
-      const cachedGo = getCachedModels("go") ?? void 0;
-      const result = await getModels(BACKENDS.go, cachedGo);
-      goModels = result.models;
-      if (!result.fromCache && !dryRun) setCachedModels("go", goModels);
-    }
-    const total = zenModels.length + goModels.length;
-    spinner3.stop(`Loaded ${total} models`);
+    const backends = [];
+    if (needsZen) backends.push("zen");
+    if (needsGo) backends.push("go");
+    const fetched = await fetchZenGoModels(backends, !dryRun);
+    zenModels = fetched.zenModels;
+    goModels = fetched.goModels;
+    spinner3.stop(`Loaded ${zenModels.length + goModels.length} models`);
   } catch (err) {
     spinner3.stop(pc3.red("Failed to load models"));
     console.error(pc3.red(String(err instanceof Error ? err.message : err)));
@@ -3837,6 +4438,22 @@ async function runClaudeCommand(parsed) {
   const selection = await runWizard(prefs, { zen: zenModels, go: goModels }, conflicts, tier);
   if (!selection) return 0;
   if (!dryRun) savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id, lastProvider: "opencode" });
+  if (switchMenuActive && hasZenGoFavorites && !dryRun) {
+    const resolveRoute = makeRouteResolver(localProviders, earlyZenModels, earlyGoModels, effectiveKey);
+    const startingRoute = zenGoModelToRoute(selection.model, effectiveKey);
+    if (!startingRoute) {
+      p4.log.error("Could not resolve a proxy route for the selected model.");
+      return 1;
+    }
+    const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    return launchClaudeViaCatalog(
+      catalogRoutes,
+      startingRoute,
+      selection.model.contextWindow,
+      trace,
+      claudeArgs
+    );
+  }
   const disableExperimentalBetas = selection.model.modelFormat !== "openai";
   if (dryRun) {
     printDryRun(
@@ -3917,6 +4534,17 @@ Error: ${parsed.error}
     }
     return runServerCommand();
   }
+  if (parsed.command === "models") {
+    if (parsed.showVersion) {
+      console.log(VERSION);
+      return 0;
+    }
+    if (parsed.showHelp) {
+      printHelp(modelsHelpText());
+      return 0;
+    }
+    return runModelsCommand();
+  }
   if (parsed.showVersion) {
     console.log(VERSION);
     return 0;
@@ -3949,9 +4577,11 @@ if (isCliEntryPoint()) {
 export {
   claudeHelpText,
   main,
+  modelsHelpText,
   parseArgs,
   rootHelpText,
   runClaudeCommand,
+  runModelsCommand,
   serverHelpText
 };
 //# sourceMappingURL=cli.js.map

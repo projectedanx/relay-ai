@@ -1,10 +1,43 @@
 // tests/env.test.ts
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { detectConflicts, resolveApiKey, buildChildEnv } from '../src/env.js';
+import { detectConflicts, resolveApiKey, buildChildEnv, classifyKeyringError } from '../src/env.js';
 import { BACKENDS, CONFLICTING_ENV_VARS } from '../src/constants.js';
 
 // Snapshot of all conflicting vars before any test so we can restore them
 const originalConflictingValues: Record<string, string | undefined> = {};
+
+describe('classifyKeyringError', () => {
+  it('identifies missing native module', () => {
+    expect(classifyKeyringError(new Error("Cannot find module '@napi-rs/keyring'"))).toContain('native keyring module');
+    expect(classifyKeyringError(new Error('Module not found: keyring.node'))).toContain('native keyring module');
+    expect(classifyKeyringError(new Error('failed to load native binding'))).toContain('native keyring module');
+  });
+
+  it('identifies Secret Service / D-Bus daemon not running', () => {
+    expect(classifyKeyringError(new Error('Secret Service error: no daemon running'))).toContain('Secret Service daemon');
+    expect(classifyKeyringError(new Error('DBus error: connection refused'))).toContain('Secret Service daemon');
+    expect(classifyKeyringError(new Error('daemon not available'))).toContain('Secret Service daemon');
+  });
+
+  it('identifies permission denied / locked keychain', () => {
+    expect(classifyKeyringError(new Error('access denied by user'))).toContain('denied');
+    expect(classifyKeyringError(new Error('keychain is locked'))).toContain('denied');
+    expect(classifyKeyringError(new Error('user cancelled the operation'))).toContain('denied');
+    expect(classifyKeyringError(new Error('user refused to grant access'))).toContain('denied');
+  });
+
+  it('falls back to generic message for unknown errors', () => {
+    const result = classifyKeyringError(new Error('something totally unexpected'));
+    expect(result).toContain('keyring error:');
+    expect(result).toContain('something totally unexpected');
+  });
+
+  it('handles non-Error values gracefully', () => {
+    expect(() => classifyKeyringError('string error')).not.toThrow();
+    expect(() => classifyKeyringError(42)).not.toThrow();
+    expect(() => classifyKeyringError(null)).not.toThrow();
+  });
+});
 
 describe('detectConflicts', () => {
   beforeEach(() => {

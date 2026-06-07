@@ -1,0 +1,49 @@
+// tests/catalog.test.ts
+import { describe, it, expect } from 'vitest';
+import { MAX_MODEL_CATALOG } from '../src/constants.js';
+import { buildCatalogRoutes, localModelToRoute } from '../src/catalog.js';
+import type { FavoriteModel, LocalProvider } from '../src/types.js';
+
+describe('buildCatalogRoutes', () => {
+  const starting = {
+    aliasId: 'claude-sonnet-4',
+    realModelId: 'claude-sonnet-4',
+    displayName: 'Sonnet (Groq)',
+    upstreamUrl: 'https://api.groq.com',
+    apiKey: 'k',
+    modelFormat: 'openai' as const,
+  };
+
+  const resolve = (providerId: string, modelId: string) =>
+    providerId === 'groq' && modelId === 'llama-3.3-70b'
+      ? { ...starting, aliasId: 'anthropic-groq__llama-3.3-70b', realModelId: modelId }
+      : undefined;
+
+  it('dedupes starting model and caps catalog size', () => {
+    const favorites: FavoriteModel[] = [
+      { providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { providerId: 'zen', modelId: 'claude-sonnet-4' },
+    ];
+    const routes = buildCatalogRoutes(starting, favorites, resolve, MAX_MODEL_CATALOG);
+    expect(routes[0]).toEqual(starting);
+    expect(routes).toHaveLength(2);
+  });
+});
+
+describe('localModelToRoute', () => {
+  it('returns null when routing fields are missing', () => {
+    const provider: LocalProvider = {
+      id: 'p',
+      name: 'P',
+      apiKey: 'k',
+      models: [{
+        id: 'm',
+        name: 'M',
+        family: '',
+        brand: 'Other',
+        modelFormat: 'openai',
+      }],
+    };
+    expect(localModelToRoute(provider, provider.models[0]!)).toBeNull();
+  });
+});

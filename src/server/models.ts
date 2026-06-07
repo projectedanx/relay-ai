@@ -56,13 +56,25 @@ export function createModelCatalog(models: ServerModelInfo[]): ModelCatalog {
   };
 }
 
-export function formatAnthropicModels(models: ServerModelInfo[]) {
+export interface ModelDisplayEntry {
+  id: string;
+  name: string;
+  contextWindow?: number;
+}
+
+export function formatAnthropicModelList(entries: ModelDisplayEntry[]) {
   return {
-    data: models.map(model => formatAnthropicModelEntry(model.id, model.name, model.contextWindow)),
+    data: entries.map(entry => formatAnthropicModelEntry(entry.id, entry.name, entry.contextWindow)),
     has_more: false,
-    first_id: models[0]?.id ?? null,
-    last_id: models.at(-1)?.id ?? null,
+    first_id: entries[0]?.id ?? null,
+    last_id: entries.at(-1)?.id ?? null,
   };
+}
+
+export function formatAnthropicModels(models: ServerModelInfo[]) {
+  return formatAnthropicModelList(
+    models.map(model => ({ id: model.id, name: model.name, contextWindow: model.contextWindow })),
+  );
 }
 
 export function formatOpenAIModels(models: ServerModelInfo[]) {

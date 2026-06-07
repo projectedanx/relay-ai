@@ -16,9 +16,10 @@ npx vitest run tests/models.test.ts
 
 # Test the CLI locally (already npm-linked)
 opencode-starter --help
-opencode-starter --dry-run       # simulate full first-run without writing anything
-opencode-starter --setup         # re-ask subscription tier
-opencode-starter --trace         # write Claude Code debug log to /tmp and print errors on exit
+opencode-starter models          # manage favorite models for mid-session switching
+opencode-starter claude --dry-run   # simulate full first-run without writing anything
+opencode-starter claude --setup    # re-ask subscription tier
+opencode-starter claude --trace    # write Claude Code debug log to /tmp and print errors on exit
 
 # Rebuild after code changes before testing manually
 npm run build && opencode-starter --version
@@ -44,12 +45,22 @@ cli.ts
   ── Local provider path ──
   → pickLocalModel()           [prompts.ts — filter/select model from local provider]
 
-  ── Shared launch ──
-  → startProxy()               [proxy.ts — only for OpenAI-format models; takes full completionsUrl]
-  → buildChildEnv(baseUrl, …)  [env.ts — removes 17 conflicting vars, sets 3 OpenCode vars]
+  ── Shared launch (no favorites) ──
+  → startProxy()               [proxy.ts — single-model wrapper around startProxyCatalog]
+  → buildChildEnv(baseUrl, …)  [env.ts — removes 17 conflicting vars, sets OpenCode vars]
   → launchClaude()             [launch.ts — spawn with stdio:inherit]
   → proxyHandle.close()        [stops proxy after Claude exits]
+
+  ── Switch-menu launch (favorites.length > 0) ──
+  → buildCatalogRoutes()       [catalog.ts — starting model + favorites, max 10]
+  → startProxyCatalog()        [proxy.ts — multi-route proxy, alias IDs per model]
+  → buildChildEnv(…, gatewayDiscovery=true)  [sets CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1]
+  → launchClaudeViaCatalog()   [cli.ts — shared launch + trace cleanup]
 ```
+
+**`opencode-starter models`:** Interactive favorites manager (`src/favorites.ts`). Reads/writes `favoriteModels` in config. Saves once on Done. Stale favorites (unavailable models) are silently skipped when building the catalog.
+
+**Catalog routing** (`src/catalog.ts`): `localModelToRoute`, `zenGoModelToRoute`, `makeRouteResolver`, `buildCatalogRoutes`. Routes built only for starting model + favorites — not the full model list. Alias IDs via `aliasModelId()` in proxy so Claude Code sees unique model names in `/model`.
 
 **Critical URL constraint:** `BACKENDS.baseUrl` in `constants.ts` must NOT include `/v1`. The Anthropic SDK appends `/v1/messages` automatically. Setting it to `https://opencode.ai/zen/v1` would cause requests to hit `/zen/v1/v1/messages` → 404.
 
@@ -81,7 +92,7 @@ The Gemini native path is required because the OpenAI-compatible Gemini endpoint
 
 **Env isolation:** `buildChildEnv()` copies `process.env`, deletes all 17 vars in `CONFLICTING_ENV_VARS`, then sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`. Also always sets `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` (OpenCode proxy doesn't support all Anthropic beta headers). The parent process env is never mutated.
 
-**Preferences** (via `conf` package at `~/.config/opencode-starter/config.json`): `lastBackend`, `lastModel`, `lastProvider`, `subscriptionTier`, and a 1-hour model list cache. All writes are skipped when `dryRun === true`.
+**Preferences** (at `~/.opencode-starter/config.json`, migrated from legacy `conf` path on first read): `lastBackend`, `lastModel`, `lastProvider`, `recentModelsByProvider`, `favoriteModels`, `subscriptionTier`, and a 1-hour model list cache. Override path with `OPENCODE_STARTER_HOME`. All writes are skipped when `dryRun === true`.
 
 **API key storage** uses `@napi-rs/keyring` (installed as `optionalDependencies`) for cross-platform credential store access. The module is loaded via dynamic `import()` so a missing native binary degrades gracefully. `tsup.config.ts` marks it as `external` so esbuild doesn't try to bundle the native `.node` addon.
 
@@ -126,7 +137,13 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 
 **Recent models per provider** (`src/prompts.ts`, `src/cli.ts`, `src/types.ts`, `src/config.ts`): `UserPreferences.recentModelsByProvider: Record<string, string[]>` stores up to 3 recently used model IDs per provider. `pickLocalModel()` shows them at the top of the picker with a `'recent'` hint, plus a "Browse all models →" option. On launch, `cli.ts` prepends the selected model id and saves back (deduped, max 3). Skipped on `--dry-run`.
 
-**Tests** cover pure functions only: `env.ts` (all 3 functions), `models.ts` (`deriveBrand`, `classifyModelFormat`, `mergeModels`, `groupModels`), `proxy.ts` (`translateRequest`, `translateResponse`, token extraction, `translateStream` thought_signature), and `providers.ts` (`resolveEndpoint`, `normalizeProviders`). Interactive modules (`prompts.ts`, `launch.ts`) and `config.ts` are verified manually.
+**Large catalog UX** (`src/prompts.ts`): `MODEL_SEARCH_THRESHOLD = 25` — lists above this show search or paginated browse. `MODEL_PAGE_SIZE = 15` — prev/next pagination. `selectModelWithSearch`, `selectLargeCatalog`, `pickModelFromPagedList`.
+
+**Shared upstream forwarding** (`src/upstream-forward.ts`): `relayAnthropicMessages`, `postJsonUpstream`, anthropic header helpers — used by `proxy.ts` and `server/router.ts`.
+
+**Provider catalog helpers** (`src/provider-catalog.ts`): `fetchProviderCatalog`, `fetchZenGoModels`, `providersForPicker`, `localProvidersToServerModels` — shared between CLI and server.
+
+**Tests** cover pure functions: `env.ts`, `models.ts`, `proxy.ts`, `proxy-gemini.ts`, `proxy-responses.ts`, `providers.ts`, `catalog.ts`, `favorites.ts`, `prompts.ts`, `upstream-forward.ts`, `config.ts`, `cli.ts` (help text), server modules. Interactive launch flow verified manually.
 
 ## Key constraints
 
@@ -134,23 +151,20 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `--dry-run` ignores all saved state (env key, Keychain, tier, preferences) and skips all writes. Used to simulate a fresh first-run experience.
 - When adding a new backend, update `BACKENDS` in `constants.ts`, the `BackendConfig` id union in `types.ts`, and the subscription tier logic in `prompts.ts` and `cli.ts`.
 - `buildChildEnv(baseUrl: string, model, apiKey, proxyPort?)` — takes a plain string URL, not a `BackendConfig`. When `proxyPort` is set, `ANTHROPIC_BASE_URL` is always `http://127.0.0.1:{proxyPort}` regardless of `baseUrl`.
-- `startProxy(completionsUrl: string, modelId, debug)` — takes the full chat completions URL including path. Callers must append `/v1/chat/completions` themselves (e.g. `${backend.baseUrl}/v1/chat/completions` for Zen/Go).
+- `startProxy(completionsUrl, modelId, debug)` — single-model wrapper; takes full chat completions URL including path.
+- `startProxyCatalog(routes, startingAliasId, debug)` — multi-route catalog proxy for switch-menu sessions.
+- `MAX_MODEL_CATALOG = 10` in `constants.ts` — favorites cap and max routes in catalog.
 
-## In-progress work (branch: feature/local-providers)
+## Release status (v0.3.0 + unreleased favorites)
 
-**Status:** Implementation complete (v0.3.1 features). Installed globally for manual testing.
+**Shipped in v0.3.0:** Local providers, Gemini native API, OpenAI Responses API routing, Mistral message order, tool-search passthrough, recent models, context window in `/v1/models`, server local-provider catalog.
 
-**Completed features:**
-- Local provider discovery and routing (Groq, Mistral, xAI, Anthropic-direct, Ollama, Google/Gemini)
-- Gemini native API translation in `src/proxy-gemini.ts` — enables full thinking mode and correct tool call round-trips with `thought_signature`
-- Recent models per provider shown at top of picker (up to 3, stored in `recentModelsByProvider`)
-- Accurate context window in Claude Code status bar via `context_window` in `/v1/models` synthetic response
-- `prompt_cache_key` removed from OpenAI translation (was causing 400 errors from Google/Groq/Mistral)
+**Unreleased (in working tree):** `opencode-starter models` favorites manager, `startProxyCatalog` switch menu, model search/browse UX, `catalog.ts` / `provider-catalog.ts` / `upstream-forward.ts` refactors.
 
-**Pending before merge:**
-- Broader manual testing of other local providers (Groq, Mistral, xAI, Anthropic-direct, Ollama via `@ai-sdk/openai-compatible`).
+**Pre-release checklist:**
+- Broader manual testing of local providers (Groq, Mistral, xAI, Anthropic-direct, Ollama).
 - Ollama note: must set a non-empty placeholder key in OpenCode config (Ollama ignores the auth header).
-- PR creation and review.
+- Bump version and move CHANGELOG `[Unreleased]` to tagged release when favorites land.
 
 **Known limitations (by design):**
 - Cost display in Claude Code is always inaccurate for non-Anthropic models.

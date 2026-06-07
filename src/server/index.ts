@@ -3,15 +3,13 @@ import { networkInterfaces } from 'node:os';
 import * as p from '@clack/prompts';
 import { resolveApiKey, readFromCredentialStore } from '../env.js';
 import {
-  getCachedModels,
   getSavedServerPassword,
   getSubscriptionTier,
-  setCachedModels,
   setSavedServerPassword,
 } from '../config.js';
-import { getModels } from '../models.js';
-import { fetchLocalProviders } from '../providers.js';
 import { BACKENDS } from '../constants.js';
+import { fetchZenGoModels, localProvidersToServerModels } from '../provider-catalog.js';
+import { fetchLocalProviders } from '../providers.js';
 import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo } from './models.js';
 import {
@@ -89,38 +87,20 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
   const needsGo = tier === 'go' || tier === 'both';
   const models: ServerModelInfo[] = [];
 
-  if (needsZen) {
-    const result = await getModels(BACKENDS.zen, getCachedModels('zen') ?? undefined);
-    if (!result.fromCache) setCachedModels('zen', result.models);
-    models.push(...modelsForTier(tier, 'zen', result.models));
-  }
+  const zenGoBackends: Array<'zen' | 'go'> = [];
+  if (needsZen) zenGoBackends.push('zen');
+  if (needsGo) zenGoBackends.push('go');
 
-  if (needsGo) {
-    const result = await getModels(BACKENDS.go, getCachedModels('go') ?? undefined);
-    if (!result.fromCache) setCachedModels('go', result.models);
-    models.push(...modelsForTier(tier, 'go', result.models));
+  if (zenGoBackends.length > 0) {
+    const zenGo = await fetchZenGoModels(zenGoBackends, true);
+    if (needsZen) models.push(...modelsForTier(tier, 'zen', zenGo.zenModels));
+    if (needsGo) models.push(...modelsForTier(tier, 'go', zenGo.goModels));
   }
 
   try {
     const localProviders = await fetchLocalProviders();
     if (localProviders !== null) {
-      for (const provider of localProviders) {
-        for (const model of provider.models) {
-          models.push({
-            id: model.id,
-            name: model.name,
-            isFree: false,
-            brand: model.brand,
-            sourceBackend: 'zen', // fallback; won't be used when per-model routing fields are set
-            modelFormat: model.modelFormat,
-            cost: model.cost,
-            baseUrl: model.baseUrl,
-            completionsUrl: model.completionsUrl,
-            apiKey: provider.apiKey, // routing only — never logged or returned in API responses
-            contextWindow: model.contextWindow,
-          });
-        }
-      }
+      models.push(...localProvidersToServerModels(localProviders));
     } else {
       p.log.info('No local providers found — using cloud models only');
     }
@@ -134,7 +114,9 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
 export async function runServerCommand(): Promise<number> {
   let apiKey = resolveApiKey();
   if (!apiKey) {
-    apiKey = await readFromCredentialStore();
+    apiKey = await readFromCredentialStore((reason) => {
+      p.log.warn(`Credential store unavailable — ${reason}`);
+    });
     if (apiKey) {
       const isMac = process.platform === 'darwin';
       const isWindows = process.platform === 'win32';
