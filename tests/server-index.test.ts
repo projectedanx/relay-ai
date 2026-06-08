@@ -31,6 +31,8 @@ vi.mock('../src/config.js', () => ({
   getCachedModels: () => state.cachedModels,
   getSavedServerPassword: () => state.savedPassword,
   getServerExposedProviders: () => null,
+  getServerMaskGatewayIds: () => true,
+  getServerFavoritesOnly: () => false,
   getSubscriptionTier: () => state.tier,
   loadPreferences: () => ({ favoriteModels: [] }),
   setCachedModels: vi.fn(),
@@ -38,6 +40,8 @@ vi.mock('../src/config.js', () => ({
     state.savedPassword = password;
   },
   setServerExposedProviders: vi.fn(),
+  setServerMaskGatewayIds: vi.fn(),
+  setServerFavoritesOnly: vi.fn(),
 }));
 
 vi.mock('../src/models.js', () => ({
@@ -50,6 +54,7 @@ vi.mock('../src/providers.js', () => ({
 }));
 
 vi.mock('../src/server/prompts.js', () => ({
+  askServerStartMode: async () => 'quick',
   askListenMode: async () => state.listenMode,
   askSaveServerPassword: async () => state.savePassword,
   askServerPassword: async () => state.serverPassword,

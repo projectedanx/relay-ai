@@ -18,7 +18,7 @@ opencode-starter is an interactive CLI wizard that configures and launches AI co
 - **Dry run mode** — preview exactly what would be run without launching anything
 - **Preference memory** — remembers your last backend, provider, and model, pre-selects them next time
 - **Local providers** — use any model from your [OpenCode](https://opencode.ai) config (BYOK) alongside Zen/Go cloud backends; new providers added in OpenCode appear automatically (Cerebras, Perplexity, Bedrock, etc.)
-- **Favorite models** — save up to 10 favorites and switch between them mid-session via Claude Code's `/model` command
+- **Favorite models** — save up to 20 favorites and switch between them mid-session via Claude Code's `/model` command
 - **Smart model pickers** — recent models per provider, search for large lists (>25), or paginated browse (15 per page)
 
 ## Supported tools
@@ -80,7 +80,7 @@ Save models you switch between often:
 opencode-starter models
 ```
 
-Add up to 10 favorites from Zen, Go, or any local provider. When you have favorites, `opencode-starter claude` automatically starts a multi-route proxy. Claude Code's `/model` command then lists your starting model plus favorites — switch live without restarting.
+Add up to 20 favorites from Zen, Go, or any local provider. When you have favorites, `opencode-starter claude` automatically starts a multi-route proxy. Claude Code's `/model` command then lists your starting model plus favorites — switch live without restarting.
 
 With no favorites, launch behaves exactly as before (single model, no switch menu). `--dry-run` ignores saved favorites so you can preview a single-model launch.
 

@@ -130,3 +130,29 @@ export function setServerExposedProviders(providerIds: string[]): void {
   };
   writeConfig(config);
 }
+
+export function getServerMaskGatewayIds(): boolean {
+  return readConfig().server?.maskGatewayIds ?? true;
+}
+
+export function setServerMaskGatewayIds(mask: boolean): void {
+  const config = readConfig();
+  config.server = {
+    ...(config.server ?? {}),
+    maskGatewayIds: mask,
+  };
+  writeConfig(config);
+}
+
+export function getServerFavoritesOnly(): boolean {
+  return readConfig().server?.favoritesOnly ?? false;
+}
+
+export function setServerFavoritesOnly(favoritesOnly: boolean): void {
+  const config = readConfig();
+  config.server = {
+    ...(config.server ?? {}),
+    favoritesOnly,
+  };
+  writeConfig(config);
+}

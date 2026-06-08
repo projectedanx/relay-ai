@@ -1,6 +1,53 @@
 import * as p from '@clack/prompts';
 
 export type ListenMode = 'local' | 'network';
+export type ServerStartMode = 'configure' | 'quick';
+
+export async function askServerStartMode(): Promise<ServerStartMode | null> {
+  const mode = await p.select<ServerStartMode>({
+    message: 'How do you want to start the server?',
+    options: [
+      { value: 'configure', label: 'Configure & start', hint: 'Providers, discovery masking, listen mode' },
+      { value: 'quick', label: 'Start with saved settings', hint: 'Use last server configuration' },
+    ],
+    initialValue: 'configure',
+  });
+  if (p.isCancel(mode)) {
+    p.cancel('Cancelled.');
+    return null;
+  }
+  return mode;
+}
+
+export async function askMaskGatewayIds(initialValue: boolean): Promise<boolean | null> {
+  p.note(
+    'Claude Desktop and Cowork filter competitor model names in gateway ids. '
+    + 'Masking keeps discovery working while display names stay readable.',
+    'Needed for Claude Desktop / Cowork',
+  );
+
+  const mask = await p.confirm({
+    message: 'Mask gateway model ids for discovery?',
+    initialValue,
+  });
+  if (p.isCancel(mask)) {
+    p.cancel('Cancelled.');
+    return null;
+  }
+  return Boolean(mask);
+}
+
+export async function askFavoritesOnly(initialValue: boolean): Promise<boolean | null> {
+  const favoritesOnly = await p.confirm({
+    message: 'Expose only favorite models?',
+    initialValue,
+  });
+  if (p.isCancel(favoritesOnly)) {
+    p.cancel('Cancelled.');
+    return null;
+  }
+  return Boolean(favoritesOnly);
+}
 
 export async function askListenMode(): Promise<ListenMode | null> {
   const mode = await p.select<ListenMode>({

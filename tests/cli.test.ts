@@ -16,9 +16,6 @@ describe('parseArgs', () => {
       setup: false,
       trace: false,
       claudeArgs: [],
-      serverSelect: false,
-      serverFavorites: false,
-      serverMaskVendors: false,
     });
   });
 
@@ -99,21 +96,18 @@ describe('parseArgs', () => {
     });
   });
 
-  it('parses server --select and --favorites', () => {
+  it('rejects removed server flags', () => {
     expect(parseArgs(['server', '--select'])).toMatchObject({
       command: 'server',
-      serverSelect: true,
-      serverFavorites: false,
+      error: 'Unknown server option: --select',
     });
     expect(parseArgs(['server', '--favorites'])).toMatchObject({
       command: 'server',
-      serverSelect: false,
-      serverFavorites: true,
+      error: 'Unknown server option: --favorites',
     });
-    expect(parseArgs(['server', '--select', '--favorites'])).toMatchObject({
+    expect(parseArgs(['server', '--mask-vendors'])).toMatchObject({
       command: 'server',
-      serverSelect: true,
-      serverFavorites: true,
+      error: 'Unknown server option: --mask-vendors',
     });
   });
 
@@ -176,10 +170,10 @@ describe('help text', () => {
     expect(help).toContain('settings.json');
   });
 
-  it('server help explains provider filters, endpoints, and network behavior', () => {
+  it('server help explains wizard, endpoints, and network behavior', () => {
     const help = serverHelpText();
-    expect(help).toContain('--select');
-    expect(help).toContain('--favorites');
+    expect(help).toContain('wizard');
+    expect(help).toMatch(/Claude[\s\S]*Cowork/);
 
     expect(help).toContain('v0.3.0');
     expect(help).toContain('opencode-starter server');
@@ -188,7 +182,7 @@ describe('help text', () => {
     expect(help).toContain('ANTHROPIC_BASE_URL');
     expect(help).toContain('OPENAI_BASE_URL');
     expect(help).toContain('network');
-    expect(help).toContain('saved only if');
+    expect(help).toContain('server password');
   });
 
   it('models help explains favorites, local providers, and /model behavior', () => {
@@ -199,7 +193,7 @@ describe('help text', () => {
     expect(help).toContain('favorites');
     expect(help).toContain('local OpenCode provider');
     expect(help).toContain('/model');
-    expect(help).toContain('10');
+    expect(help).toContain('20');
     expect(help).toContain('~/.opencode-starter/config.json');
   });
 });

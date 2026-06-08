@@ -52,7 +52,7 @@ cli.ts
   → proxyHandle.close()        [stops proxy after Claude exits]
 
   ── Switch-menu launch (favorites.length > 0) ──
-  → buildCatalogRoutes()       [catalog.ts — starting model + favorites, max 10]
+  → buildCatalogRoutes()       [catalog.ts — starting model + favorites, max 20]
   → startProxyCatalog()        [proxy.ts — multi-route proxy, alias IDs per model]
   → buildChildEnv(…, gatewayDiscovery=true)  [sets CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1]
   → launchClaudeViaCatalog()   [cli.ts — shared launch + trace cleanup]
@@ -136,7 +136,7 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `buildChildEnv(baseUrl: string, model, apiKey, proxyPort?)` — takes a plain string URL, not a `BackendConfig`. When `proxyPort` is set, `ANTHROPIC_BASE_URL` is always `http://127.0.0.1:{proxyPort}` regardless of `baseUrl`.
 - `startProxy(completionsUrl, modelId, debug, contextWindow?, sdk?)` — single-model wrapper around `startProxyCatalog`; `sdk` carries `{ npm, baseURL }` to select the SDK provider.
 - `startProxyCatalog(routes, startingAliasId, debug)` — multi-route catalog proxy for switch-menu sessions.
-- `MAX_MODEL_CATALOG = 10` in `constants.ts` — favorites cap and max routes in catalog.
+- `MAX_MODEL_CATALOG = 20` in `constants.ts` — favorites cap and max routes in catalog.
 
 ## Release status (v0.3.0 — unreleased, prepping)
 

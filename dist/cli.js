@@ -100,7 +100,7 @@ var CONFLICTING_ENV_VARS = [
 ];
 var OPENCODE_CACHE_PATH = join2(homedir2(), ".cache", "opencode", "models.json");
 var MODELS_CACHE_TTL_MS = 60 * 60 * 1e3;
-var MAX_MODEL_CATALOG = 10;
+var MAX_MODEL_CATALOG = 20;
 var STALE_FREE_MODELS = /* @__PURE__ */ new Set([
   "qwen3.6-plus-free",
   // 401 — free promotion ended
@@ -291,39 +291,16 @@ import { createServer } from "http";
 import { appendFileSync } from "fs";
 
 // src/server/vendor-mask.ts
-var VENDOR_REPLACEMENTS = [
-  [/deepseek/gi, "keespeed"],
-  [/qwen/gi, "newq"],
-  [/minimax/gi, "xaminim"],
-  [/kimi/gi, "imik"],
-  [/glm/gi, "mlg"],
-  [/mimo/gi, "omim"],
-  [/nemotron/gi, "notarmen"],
-  [/grok/gi, "korg"],
-  [/gemini/gi, "inimeg"],
-  [/openai/gi, "ianepo"],
-  [/google/gi, "elgoog"],
-  [/gpt/gi, "tpg"]
-];
-var FAMILY_REPLACEMENTS = [
-  [/m2\.(\d)/gi, "2m.$1"],
-  [/k2\.(\d)/gi, "2k.$1"],
-  [/hy3/gi, "3yh"]
-];
-function maskVendorText(text3) {
-  let out = text3;
-  for (const [pattern, replacement] of VENDOR_REPLACEMENTS) {
-    out = out.replace(pattern, replacement);
-  }
-  for (const [pattern, replacement] of FAMILY_REPLACEMENTS) {
-    out = out.replace(pattern, replacement);
-  }
-  return out;
+function reverseSegment(value) {
+  return [...value].reverse().join("");
 }
 function maskGatewayModelId(aliasId) {
+  if (!aliasId.startsWith("anthropic-")) return aliasId;
   const sep = aliasId.indexOf("__");
-  if (sep === -1) return maskVendorText(aliasId);
-  return `${aliasId.slice(0, sep + 2)}${maskVendorText(aliasId.slice(sep + 2))}`;
+  if (sep === -1) return aliasId;
+  const providerSlug = aliasId.slice("anthropic-".length, sep);
+  const modelSuffix = aliasId.slice(sep + 2);
+  return `anthropic-${reverseSegment(providerSlug)}__${reverseSegment(modelSuffix)}`;
 }
 
 // src/server/models.ts
@@ -356,10 +333,10 @@ function gatewayAliasId(model) {
 }
 function exposedGatewayAliasId(model, opts) {
   const alias = gatewayAliasId(model);
-  return opts?.maskVendors ? maskGatewayModelId(alias) : alias;
+  return opts?.maskGatewayIds ? maskGatewayModelId(alias) : alias;
 }
 function gatewayDisplayName(model, opts) {
-  if (!opts?.maskVendors) return model.name;
+  if (!opts?.maskGatewayIds) return model.name;
   return `${model.name} (${gatewayProviderLabel(model)})`;
 }
 function formatGatewayAnthropicModels(models, opts) {
@@ -377,7 +354,7 @@ function createGatewayModelCatalog(models, opts) {
     byId.set(model.id, model);
     const alias = exposedGatewayAliasId(model, opts);
     if (alias !== model.id) byId.set(alias, model);
-    if (opts?.maskVendors) {
+    if (opts?.maskGatewayIds) {
       const rawAlias = gatewayAliasId(model);
       if (rawAlias !== alias) byId.set(rawAlias, model);
     }
@@ -1359,6 +1336,28 @@ function setServerExposedProviders(providerIds) {
   };
   writeConfig(config);
 }
+function getServerMaskGatewayIds() {
+  return readConfig().server?.maskGatewayIds ?? true;
+}
+function setServerMaskGatewayIds(mask) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    maskGatewayIds: mask
+  };
+  writeConfig(config);
+}
+function getServerFavoritesOnly() {
+  return readConfig().server?.favoritesOnly ?? false;
+}
+function setServerFavoritesOnly(favoritesOnly) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    favoritesOnly
+  };
+  writeConfig(config);
+}
 
 // src/models.ts
 var BRAND_MAP = [
@@ -1715,6 +1714,47 @@ function zenGoModelsToServerModels(models) {
 
 // src/server/prompts.ts
 import * as p from "@clack/prompts";
+async function askServerStartMode() {
+  const mode = await p.select({
+    message: "How do you want to start the server?",
+    options: [
+      { value: "configure", label: "Configure & start", hint: "Providers, discovery masking, listen mode" },
+      { value: "quick", label: "Start with saved settings", hint: "Use last server configuration" }
+    ],
+    initialValue: "configure"
+  });
+  if (p.isCancel(mode)) {
+    p.cancel("Cancelled.");
+    return null;
+  }
+  return mode;
+}
+async function askMaskGatewayIds(initialValue) {
+  p.note(
+    "Claude Desktop and Cowork filter competitor model names in gateway ids. Masking keeps discovery working while display names stay readable.",
+    "Needed for Claude Desktop / Cowork"
+  );
+  const mask = await p.confirm({
+    message: "Mask gateway model ids for discovery?",
+    initialValue
+  });
+  if (p.isCancel(mask)) {
+    p.cancel("Cancelled.");
+    return null;
+  }
+  return Boolean(mask);
+}
+async function askFavoritesOnly(initialValue) {
+  const favoritesOnly = await p.confirm({
+    message: "Expose only favorite models?",
+    initialValue
+  });
+  if (p.isCancel(favoritesOnly)) {
+    p.cancel("Cancelled.");
+    return null;
+  }
+  return Boolean(favoritesOnly);
+}
 async function askListenMode() {
   const mode = await p.select({
     message: "Where should the server listen?",
@@ -2164,24 +2204,44 @@ function providerOptionsForTier(tier, catalog) {
   }
   return options;
 }
-async function resolveExposedProviders(tier, opts) {
-  if (opts.select) {
-    p3.intro(pc2.bold("  OpenCode Starter \u2014 Server Providers"));
-    p3.log.info("Add providers to expose. Listed providers are removed when selected \u2014 like favorites.");
-    const spinner3 = p3.spinner();
-    spinner3.start("Loading providers...");
-    const catalog = await fetchProviderCatalog();
-    spinner3.stop("");
-    const available = providerOptionsForTier(tier, catalog);
-    const picked = await selectServerProviders(available, getServerExposedProviders() ?? void 0);
-    if (!picked) return void 0;
-    setServerExposedProviders(picked);
-    p3.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? "s" : ""} for future server runs.`);
-    return picked;
-  }
-  return getServerExposedProviders();
+async function configureExposedProviders(tier) {
+  p3.log.info("Add providers to expose. Listed providers are removed when selected \u2014 like favorites.");
+  const spinner3 = p3.spinner();
+  spinner3.start("Loading providers...");
+  const catalog = await fetchProviderCatalog();
+  spinner3.stop("");
+  const available = providerOptionsForTier(tier, catalog);
+  const picked = await selectServerProviders(available, getServerExposedProviders() ?? void 0);
+  if (!picked) return void 0;
+  setServerExposedProviders(picked);
+  p3.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? "s" : ""} for future server runs.`);
+  return picked;
 }
-async function runServerCommand(opts = {}) {
+async function runServerWizard(tier) {
+  p3.intro(pc2.bold("  OpenCode Starter \u2014 Server"));
+  const startMode = await askServerStartMode();
+  if (!startMode) return void 0;
+  if (startMode === "quick") {
+    return {
+      exposedProviders: getServerExposedProviders(),
+      maskGatewayIds: getServerMaskGatewayIds(),
+      favoritesOnly: getServerFavoritesOnly()
+    };
+  }
+  const exposedProviders = await configureExposedProviders(tier);
+  if (exposedProviders === void 0) return void 0;
+  const maskGatewayIds = await askMaskGatewayIds(getServerMaskGatewayIds());
+  if (maskGatewayIds === null) return void 0;
+  setServerMaskGatewayIds(maskGatewayIds);
+  const favoritesOnly = await askFavoritesOnly(getServerFavoritesOnly());
+  if (favoritesOnly === null) return void 0;
+  setServerFavoritesOnly(favoritesOnly);
+  if (favoritesOnly) {
+    p3.log.info("Manage favorites with `opencode-starter models`.");
+  }
+  return { exposedProviders, maskGatewayIds, favoritesOnly };
+}
+async function runServerCommand() {
   let apiKey = resolveApiKey();
   if (!apiKey) {
     apiKey = await readFromCredentialStore((reason) => {
@@ -2204,8 +2264,8 @@ async function runServerCommand(opts = {}) {
     p3.log.error("Missing subscription tier. Run `opencode-starter claude --setup` first.");
     return 1;
   }
-  const exposedProviders = await resolveExposedProviders(tier, opts);
-  if (exposedProviders === void 0) return 0;
+  const runConfig = await runServerWizard(tier);
+  if (!runConfig) return 0;
   const mode = await askListenMode();
   if (!mode) return 0;
   const serverPassword = await getServerPasswordForMode(mode);
@@ -2216,40 +2276,41 @@ async function runServerCommand(opts = {}) {
   let models;
   try {
     models = await loadServerModels(tier);
-    if (exposedProviders) {
-      models = filterServerModelsByProviders(models, exposedProviders);
+    if (runConfig.exposedProviders) {
+      models = filterServerModelsByProviders(models, runConfig.exposedProviders);
     }
-    if (opts.favorites) {
+    if (runConfig.favoritesOnly) {
       const favorites = loadPreferences().favoriteModels ?? [];
       if (favorites.length === 0) {
         spinner3.stop(pc2.red("No favorite models configured"));
-        p3.log.error("Run `opencode-starter models` to add favorites, or start without --favorites.");
+        p3.log.error("Run `opencode-starter models` to add favorites, or turn off favorites-only in the server wizard.");
         return 1;
       }
       models = filterServerModelsByFavorites(models, favorites);
       if (models.length === 0) {
         spinner3.stop(pc2.red("No favorite models matched the current provider filter"));
-        p3.log.error("Adjust favorites with `opencode-starter models` or run `opencode-starter server --select`.");
+        p3.log.error("Adjust favorites with `opencode-starter models` or change exposed providers in the server wizard.");
         return 1;
       }
     }
     if (models.length === 0) {
       spinner3.stop(pc2.red("No models to expose"));
-      p3.log.error("Run `opencode-starter server --select` to choose providers with available models.");
+      p3.log.error("Add providers in the server wizard \u2014 Configure & start \u2192 manage exposed providers.");
       return 1;
     }
     const localCount = models.filter((m) => m.apiKey !== void 0).length;
     const summary = summarizeServerProviders(models);
-    const filterNote = exposedProviders ? ` \u2014 ${exposedProviders.length} provider${exposedProviders.length !== 1 ? "s" : ""}` : "";
-    const favoritesNote = opts.favorites ? " \u2014 favorites only" : "";
-    spinner3.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}`);
+    const filterNote = runConfig.exposedProviders ? ` \u2014 ${runConfig.exposedProviders.length} provider${runConfig.exposedProviders.length !== 1 ? "s" : ""}` : "";
+    const favoritesNote = runConfig.favoritesOnly ? " \u2014 favorites only" : "";
+    const maskNote = runConfig.maskGatewayIds ? " \u2014 discovery ids masked" : "";
+    spinner3.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p3.log.info(summary);
   } catch (err) {
     spinner3.stop(pc2.red("Failed to load models"));
     console.error(pc2.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
-  const gateway = opts.maskVendors ? { maskVendors: true } : void 0;
+  const gateway = runConfig.maskGatewayIds ? { maskGatewayIds: true } : void 0;
   const server = await startServer({
     host,
     port: 17645,
@@ -2269,14 +2330,14 @@ async function runServerCommand(opts = {}) {
   } else {
     console.log("  API key:    any non-empty value");
   }
-  if (exposedProviders) {
-    console.log(pc2.dim(`  Providers:  ${exposedProviders.join(", ")} (server --select to change)`));
+  if (runConfig.exposedProviders) {
+    console.log(pc2.dim(`  Providers:  ${runConfig.exposedProviders.join(", ")}`));
   }
-  if (opts.favorites) {
-    console.log(pc2.dim("  Catalog:    favorite models only (server --favorites)"));
+  if (runConfig.favoritesOnly) {
+    console.log(pc2.dim("  Catalog:    favorite models only"));
   }
-  if (opts.maskVendors) {
-    console.log(pc2.dim("  Discovery:  vendor-neutral gateway ids (display names stay readable)"));
+  if (runConfig.maskGatewayIds) {
+    console.log(pc2.dim("  Discovery:  gateway ids masked for Claude Desktop / Cowork"));
   }
   console.log("");
   console.log(pc2.dim("Press Ctrl+C to stop."));
@@ -2687,10 +2748,7 @@ function emptyParsed(command) {
     dryRun: false,
     setup: false,
     trace: false,
-    claudeArgs: [],
-    serverSelect: false,
-    serverFavorites: false,
-    serverMaskVendors: false
+    claudeArgs: []
   };
 }
 function parseArgs(args) {
@@ -2707,9 +2765,6 @@ function parseArgs(args) {
     for (const arg of rest) {
       if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
       else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
-      else if (arg === "--select") parsed2.serverSelect = true;
-      else if (arg === "--favorites") parsed2.serverFavorites = true;
-      else if (arg === "--mask-vendors") parsed2.serverMaskVendors = true;
       else if (!parsed2.error) parsed2.error = `Unknown server option: ${arg}`;
     }
     return parsed2;
@@ -2826,26 +2881,15 @@ Run a foreground API gateway for Zen, Go, and local OpenCode providers.
 
 ${pc4.bold("Usage:")}
   opencode-starter server
-  opencode-starter server --select
-  opencode-starter server --favorites
-  opencode-starter server --select --favorites
-  opencode-starter server --mask-vendors
   opencode-starter server --help
   opencode-starter server --version
 
-${pc4.bold("Options:")}
-  --select        Pick which providers to expose (saved for future runs)
-  --favorites     Expose only models saved via opencode-starter models
-  --mask-vendors  Sanitize gateway model ids for Desktop discovery (names stay readable)
-
 ${pc4.bold("Behavior:")}
+  Interactive wizard: choose exposed providers, discovery id masking (for Claude
+  Desktop / Cowork), optional favorites-only catalog, then listen mode.
+  Saved server settings are reused via "Start with saved settings".
   Loads Zen/Go models plus configured local providers into one catalog.
-  When providers were chosen with --select, later server runs reuse that filter.
-  --favorites narrows the catalog to your saved favorite models.
-  Prompts for local-only (127.0.0.1) or network (0.0.0.0) listen mode.
   Binds to port 17645. Network mode asks for a server password.
-  Server password is saved only if the user chooses to save it.
-  Server host and port are not saved.
 
 ${pc4.bold("Endpoints:")}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
@@ -3579,11 +3623,7 @@ Error: ${parsed.error}
       printHelp(serverHelpText());
       return 0;
     }
-    return runServerCommand({
-      select: parsed.serverSelect,
-      favorites: parsed.serverFavorites,
-      maskVendors: parsed.serverMaskVendors
-    });
+    return runServerCommand();
   }
   if (parsed.command === "models") {
     if (parsed.showVersion) {

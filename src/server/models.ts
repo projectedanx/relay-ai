@@ -4,7 +4,7 @@ import { aliasModelId } from '../proxy.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 
 export interface GatewayModelOptions {
-  maskVendors?: boolean;
+  maskGatewayIds?: boolean;
 }
 
 export type ServerModelFormat = 'anthropic' | 'openai' | 'unsupported';
@@ -102,12 +102,12 @@ export function gatewayAliasId(model: ServerModelInfo): string {
 
 export function exposedGatewayAliasId(model: ServerModelInfo, opts?: GatewayModelOptions): string {
   const alias = gatewayAliasId(model);
-  return opts?.maskVendors ? maskGatewayModelId(alias) : alias;
+  return opts?.maskGatewayIds ? maskGatewayModelId(alias) : alias;
 }
 
-/** Readable picker label — ids may be masked for Desktop discovery, names stay real. */
+/** Readable picker label — discovery ids may be masked; names stay real. */
 export function gatewayDisplayName(model: ServerModelInfo, opts?: GatewayModelOptions): string {
-  if (!opts?.maskVendors) return model.name;
+  if (!opts?.maskGatewayIds) return model.name;
   return `${model.name} (${gatewayProviderLabel(model)})`;
 }
 
@@ -128,7 +128,7 @@ export function createGatewayModelCatalog(models: ServerModelInfo[], opts?: Gate
     byId.set(model.id, model);
     const alias = exposedGatewayAliasId(model, opts);
     if (alias !== model.id) byId.set(alias, model);
-    if (opts?.maskVendors) {
+    if (opts?.maskGatewayIds) {
       const rawAlias = gatewayAliasId(model);
       if (rawAlias !== alias) byId.set(rawAlias, model);
     }

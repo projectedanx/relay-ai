@@ -7,7 +7,7 @@
 ### Added
 - Local OpenCode provider discovery — launch Claude Code with any provider configured in OpenCode: Groq, Mistral, xAI, Google/Gemini, OpenAI, Anthropic-direct, Ollama, OpenRouter, Cerebras, Perplexity, Bedrock, Vertex, and more. Includes full Gemini thinking + tool calls, OpenAI Responses-API models (GPT-5.4+, GPT-5.5, Codex, o-series), and Mistral.
 - Bundled OpenCode SDK provider packages (Cerebras, Perplexity, Bedrock, Vertex, Azure, Together AI, DeepInfra, Alibaba, GitLab, Venice, and others) so any provider configured in OpenCode resolves at runtime without extra installs.
-- `opencode-starter models` — interactive favorites manager (up to 10 models) for mid-session switching. With favorites set, Claude Code's `/model` switches live between your starting model and your favorites.
+- `opencode-starter models` — interactive favorites manager (up to 20 models) for mid-session switching. With favorites set, Claude Code's `/model` switches live between your starting model and your favorites.
 - Model picker search and paginated browse for large catalogs; recent models per provider shown at the top of pickers.
 - Accurate `context_window` in synthetic `/v1/models` responses so Claude Code's status bar shows real remaining context.
 - `opencode-starter server` exposes local-provider models with per-model routing; `GET /models` never returns API keys.

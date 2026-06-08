@@ -37,9 +37,6 @@ function emptyParsed(command: ParsedArgs['command']): ParsedArgs {
     setup: false,
     trace: false,
     claudeArgs: [],
-    serverSelect: false,
-    serverFavorites: false,
-    serverMaskVendors: false,
   };
 }
 
@@ -60,9 +57,6 @@ export function parseArgs(args: string[]): ParsedArgs {
     for (const arg of rest) {
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
-      else if (arg === '--select') parsed.serverSelect = true;
-      else if (arg === '--favorites') parsed.serverFavorites = true;
-      else if (arg === '--mask-vendors') parsed.serverMaskVendors = true;
       else if (!parsed.error) parsed.error = `Unknown server option: ${arg}`;
     }
     return parsed;
@@ -188,26 +182,15 @@ Run a foreground API gateway for Zen, Go, and local OpenCode providers.
 
 ${pc.bold('Usage:')}
   opencode-starter server
-  opencode-starter server --select
-  opencode-starter server --favorites
-  opencode-starter server --select --favorites
-  opencode-starter server --mask-vendors
   opencode-starter server --help
   opencode-starter server --version
 
-${pc.bold('Options:')}
-  --select        Pick which providers to expose (saved for future runs)
-  --favorites     Expose only models saved via opencode-starter models
-  --mask-vendors  Sanitize gateway model ids for Desktop discovery (names stay readable)
-
 ${pc.bold('Behavior:')}
+  Interactive wizard: choose exposed providers, discovery id masking (for Claude
+  Desktop / Cowork), optional favorites-only catalog, then listen mode.
+  Saved server settings are reused via "Start with saved settings".
   Loads Zen/Go models plus configured local providers into one catalog.
-  When providers were chosen with --select, later server runs reuse that filter.
-  --favorites narrows the catalog to your saved favorite models.
-  Prompts for local-only (127.0.0.1) or network (0.0.0.0) listen mode.
   Binds to port 17645. Network mode asks for a server password.
-  Server password is saved only if the user chooses to save it.
-  Server host and port are not saved.
 
 ${pc.bold('Endpoints:')}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
@@ -1089,11 +1072,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       printHelp(serverHelpText());
       return 0;
     }
-    return runServerCommand({
-      select: parsed.serverSelect,
-      favorites: parsed.serverFavorites,
-      maskVendors: parsed.serverMaskVendors,
-    });
+    return runServerCommand();
   }
 
   if (parsed.command === 'models') {

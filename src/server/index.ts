@@ -6,10 +6,14 @@ import { sanitizeCredential } from './auth.js';
 import {
   getSavedServerPassword,
   getServerExposedProviders,
+  getServerFavoritesOnly,
+  getServerMaskGatewayIds,
   getSubscriptionTier,
   loadPreferences,
   setSavedServerPassword,
   setServerExposedProviders,
+  setServerFavoritesOnly,
+  setServerMaskGatewayIds,
 } from '../config.js';
 import { BACKENDS } from '../constants.js';
 import { fetchProviderCatalog, fetchZenGoModels, localProvidersToServerModels, zenGoModelsToServerModels } from '../provider-catalog.js';
@@ -17,9 +21,12 @@ import { fetchLocalProviders } from '../providers.js';
 import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo } from './models.js';
 import {
+  askFavoritesOnly,
   askListenMode,
+  askMaskGatewayIds,
   askSaveServerPassword,
   askServerPassword,
+  askServerStartMode,
   askUseSavedServerPassword,
 } from './prompts.js';
 import { createGatewayModelCatalog } from './models.js';
@@ -33,10 +40,10 @@ import { selectServerProviders, type ServerProviderOption } from './provider-sel
 
 type SubscriptionTier = 'free' | 'zen' | 'go' | 'both';
 
-export interface ServerCommandOptions {
-  select?: boolean;
-  favorites?: boolean;
-  maskVendors?: boolean;
+export interface ServerRunConfig {
+  exposedProviders: string[] | null;
+  maskGatewayIds: boolean;
+  favoritesOnly: boolean;
 }
 
 function getLocalIp(): string {
@@ -159,30 +166,53 @@ function providerOptionsForTier(
   return options;
 }
 
-async function resolveExposedProviders(
-  tier: SubscriptionTier,
-  opts: ServerCommandOptions,
-): Promise<string[] | null | undefined> {
-  if (opts.select) {
-    p.intro(pc.bold('  OpenCode Starter — Server Providers'));
-    p.log.info('Add providers to expose. Listed providers are removed when selected — like favorites.');
-    const spinner = p.spinner();
-    spinner.start('Loading providers...');
-    const catalog = await fetchProviderCatalog();
-    spinner.stop('');
+async function configureExposedProviders(tier: SubscriptionTier): Promise<string[] | null | undefined> {
+  p.log.info('Add providers to expose. Listed providers are removed when selected — like favorites.');
+  const spinner = p.spinner();
+  spinner.start('Loading providers...');
+  const catalog = await fetchProviderCatalog();
+  spinner.stop('');
 
-    const available = providerOptionsForTier(tier, catalog);
-    const picked = await selectServerProviders(available, getServerExposedProviders() ?? undefined);
-    if (!picked) return undefined;
-    setServerExposedProviders(picked);
-    p.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? 's' : ''} for future server runs.`);
-    return picked;
-  }
-
-  return getServerExposedProviders();
+  const available = providerOptionsForTier(tier, catalog);
+  const picked = await selectServerProviders(available, getServerExposedProviders() ?? undefined);
+  if (!picked) return undefined;
+  setServerExposedProviders(picked);
+  p.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? 's' : ''} for future server runs.`);
+  return picked;
 }
 
-export async function runServerCommand(opts: ServerCommandOptions = {}): Promise<number> {
+async function runServerWizard(tier: SubscriptionTier): Promise<ServerRunConfig | undefined> {
+  p.intro(pc.bold('  OpenCode Starter — Server'));
+
+  const startMode = await askServerStartMode();
+  if (!startMode) return undefined;
+
+  if (startMode === 'quick') {
+    return {
+      exposedProviders: getServerExposedProviders(),
+      maskGatewayIds: getServerMaskGatewayIds(),
+      favoritesOnly: getServerFavoritesOnly(),
+    };
+  }
+
+  const exposedProviders = await configureExposedProviders(tier);
+  if (exposedProviders === undefined) return undefined;
+
+  const maskGatewayIds = await askMaskGatewayIds(getServerMaskGatewayIds());
+  if (maskGatewayIds === null) return undefined;
+  setServerMaskGatewayIds(maskGatewayIds);
+
+  const favoritesOnly = await askFavoritesOnly(getServerFavoritesOnly());
+  if (favoritesOnly === null) return undefined;
+  setServerFavoritesOnly(favoritesOnly);
+  if (favoritesOnly) {
+    p.log.info('Manage favorites with `opencode-starter models`.');
+  }
+
+  return { exposedProviders, maskGatewayIds, favoritesOnly };
+}
+
+export async function runServerCommand(): Promise<number> {
   let apiKey = resolveApiKey();
   if (!apiKey) {
     apiKey = await readFromCredentialStore((reason) => {
@@ -208,8 +238,8 @@ export async function runServerCommand(opts: ServerCommandOptions = {}): Promise
     return 1;
   }
 
-  const exposedProviders = await resolveExposedProviders(tier, opts);
-  if (exposedProviders === undefined) return 0;
+  const runConfig = await runServerWizard(tier);
+  if (!runConfig) return 0;
 
   const mode = await askListenMode();
   if (!mode) return 0;
@@ -224,36 +254,37 @@ export async function runServerCommand(opts: ServerCommandOptions = {}): Promise
   let models: ServerModelInfo[];
   try {
     models = await loadServerModels(tier);
-    if (exposedProviders) {
-      models = filterServerModelsByProviders(models, exposedProviders);
+    if (runConfig.exposedProviders) {
+      models = filterServerModelsByProviders(models, runConfig.exposedProviders);
     }
-    if (opts.favorites) {
+    if (runConfig.favoritesOnly) {
       const favorites = loadPreferences().favoriteModels ?? [];
       if (favorites.length === 0) {
         spinner.stop(pc.red('No favorite models configured'));
-        p.log.error('Run `opencode-starter models` to add favorites, or start without --favorites.');
+        p.log.error('Run `opencode-starter models` to add favorites, or turn off favorites-only in the server wizard.');
         return 1;
       }
       models = filterServerModelsByFavorites(models, favorites);
       if (models.length === 0) {
         spinner.stop(pc.red('No favorite models matched the current provider filter'));
-        p.log.error('Adjust favorites with `opencode-starter models` or run `opencode-starter server --select`.');
+        p.log.error('Adjust favorites with `opencode-starter models` or change exposed providers in the server wizard.');
         return 1;
       }
     }
     if (models.length === 0) {
       spinner.stop(pc.red('No models to expose'));
-      p.log.error('Run `opencode-starter server --select` to choose providers with available models.');
+      p.log.error('Add providers in the server wizard — Configure & start → manage exposed providers.');
       return 1;
     }
 
     const localCount = models.filter(m => m.apiKey !== undefined).length;
     const summary = summarizeServerProviders(models);
-    const filterNote = exposedProviders
-      ? ` — ${exposedProviders.length} provider${exposedProviders.length !== 1 ? 's' : ''}`
+    const filterNote = runConfig.exposedProviders
+      ? ` — ${runConfig.exposedProviders.length} provider${runConfig.exposedProviders.length !== 1 ? 's' : ''}`
       : '';
-    const favoritesNote = opts.favorites ? ' — favorites only' : '';
-    spinner.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}`);
+    const favoritesNote = runConfig.favoritesOnly ? ' — favorites only' : '';
+    const maskNote = runConfig.maskGatewayIds ? ' — discovery ids masked' : '';
+    spinner.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p.log.info(summary);
   } catch (err) {
     spinner.stop(pc.red('Failed to load models'));
@@ -261,7 +292,7 @@ export async function runServerCommand(opts: ServerCommandOptions = {}): Promise
     return 1;
   }
 
-  const gateway = opts.maskVendors ? { maskVendors: true as const } : undefined;
+  const gateway = runConfig.maskGatewayIds ? { maskGatewayIds: true as const } : undefined;
   const server = await startServer({
     host,
     port: 17645,
@@ -282,14 +313,14 @@ export async function runServerCommand(opts: ServerCommandOptions = {}): Promise
   } else {
     console.log('  API key:    any non-empty value');
   }
-  if (exposedProviders) {
-    console.log(pc.dim(`  Providers:  ${exposedProviders.join(', ')} (server --select to change)`));
+  if (runConfig.exposedProviders) {
+    console.log(pc.dim(`  Providers:  ${runConfig.exposedProviders.join(', ')}`));
   }
-  if (opts.favorites) {
-    console.log(pc.dim('  Catalog:    favorite models only (server --favorites)'));
+  if (runConfig.favoritesOnly) {
+    console.log(pc.dim('  Catalog:    favorite models only'));
   }
-  if (opts.maskVendors) {
-    console.log(pc.dim('  Discovery:  vendor-neutral gateway ids (display names stay readable)'));
+  if (runConfig.maskGatewayIds) {
+    console.log(pc.dim('  Discovery:  gateway ids masked for Claude Desktop / Cowork'));
   }
   console.log('');
   console.log(pc.dim('Press Ctrl+C to stop.'));
