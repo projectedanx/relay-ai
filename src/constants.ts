@@ -48,6 +48,12 @@ export const MODELS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 /** Max models in favorites list and mid-session /model switch catalog. */
 export const MAX_MODEL_CATALOG = 20;
 
+// Local provider model ids that return 410 / are gated behind separate approval.
+// Listed in catalog but reject inference — filter to avoid bad probe results.
+export const BLACKLISTED_LOCAL_MODEL_IDS = new Set([
+  'z-ai/glm4.7',              // NVIDIA NIM: requires separate access approval
+]);
+
 // Models whose "free" status is stale — promotion ended but API still lists them.
 // Filtered to avoid misleading users into selecting a non-functional free model.
 export const STALE_FREE_MODELS = new Set([

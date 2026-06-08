@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { LocalProvider, LocalProviderModel } from './types.js';
 import { deriveBrand } from './models.js';
 import { resolveContextWindow } from './context-window.js';
+import { BLACKLISTED_LOCAL_MODEL_IDS } from './constants.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -91,6 +92,7 @@ export function normalizeProviders(raw: RawProvider[]): LocalProvider[] {
     const models: LocalProviderModel[] = [];
 
     for (const model of Object.values(provider.models ?? {})) {
+      if (BLACKLISTED_LOCAL_MODEL_IDS.has(model.id)) continue;
       const endpoint = resolveEndpoint(model.api?.npm ?? '', model.api?.url ?? '');
       if (endpoint === null) continue;
 
