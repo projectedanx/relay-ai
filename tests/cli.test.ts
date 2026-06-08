@@ -16,6 +16,9 @@ describe('parseArgs', () => {
       setup: false,
       trace: false,
       claudeArgs: [],
+      serverSelect: false,
+      serverFavorites: false,
+      serverMaskVendors: false,
     });
   });
 
@@ -96,6 +99,24 @@ describe('parseArgs', () => {
     });
   });
 
+  it('parses server --select and --favorites', () => {
+    expect(parseArgs(['server', '--select'])).toMatchObject({
+      command: 'server',
+      serverSelect: true,
+      serverFavorites: false,
+    });
+    expect(parseArgs(['server', '--favorites'])).toMatchObject({
+      command: 'server',
+      serverSelect: false,
+      serverFavorites: true,
+    });
+    expect(parseArgs(['server', '--select', '--favorites'])).toMatchObject({
+      command: 'server',
+      serverSelect: true,
+      serverFavorites: true,
+    });
+  });
+
   it('rejects unknown server options', () => {
     expect(parseArgs(['server', '--port', '1234'])).toMatchObject({
       command: 'server',
@@ -155,8 +176,10 @@ describe('help text', () => {
     expect(help).toContain('settings.json');
   });
 
-  it('server help explains catalog, endpoints, and network behavior', () => {
+  it('server help explains provider filters, endpoints, and network behavior', () => {
     const help = serverHelpText();
+    expect(help).toContain('--select');
+    expect(help).toContain('--favorites');
 
     expect(help).toContain('v0.3.0');
     expect(help).toContain('opencode-starter server');

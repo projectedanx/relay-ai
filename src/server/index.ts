@@ -2,13 +2,17 @@ import pc from 'picocolors';
 import { networkInterfaces } from 'node:os';
 import * as p from '@clack/prompts';
 import { resolveApiKey, readFromCredentialStore } from '../env.js';
+import { sanitizeCredential } from './auth.js';
 import {
   getSavedServerPassword,
+  getServerExposedProviders,
   getSubscriptionTier,
+  loadPreferences,
   setSavedServerPassword,
+  setServerExposedProviders,
 } from '../config.js';
 import { BACKENDS } from '../constants.js';
-import { fetchZenGoModels, localProvidersToServerModels, zenGoModelsToServerModels } from '../provider-catalog.js';
+import { fetchProviderCatalog, fetchZenGoModels, localProvidersToServerModels, zenGoModelsToServerModels } from '../provider-catalog.js';
 import { fetchLocalProviders } from '../providers.js';
 import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo } from './models.js';
@@ -18,10 +22,22 @@ import {
   askServerPassword,
   askUseSavedServerPassword,
 } from './prompts.js';
-import { createModelCatalog } from './models.js';
+import { createGatewayModelCatalog } from './models.js';
 import { startServer } from './router.js';
+import {
+  filterServerModelsByFavorites,
+  filterServerModelsByProviders,
+  summarizeServerProviders,
+} from './catalog-filter.js';
+import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
 
 type SubscriptionTier = 'free' | 'zen' | 'go' | 'both';
+
+export interface ServerCommandOptions {
+  select?: boolean;
+  favorites?: boolean;
+  maskVendors?: boolean;
+}
 
 function getLocalIp(): string {
   const ifaces = networkInterfaces();
@@ -111,7 +127,62 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
   return models;
 }
 
-export async function runServerCommand(): Promise<number> {
+function providerOptionsForTier(
+  tier: SubscriptionTier,
+  catalog: Awaited<ReturnType<typeof fetchProviderCatalog>>,
+): ServerProviderOption[] {
+  const options: ServerProviderOption[] = [];
+  const needsZen = tier === 'free' || tier === 'zen' || tier === 'go' || tier === 'both';
+  const needsGo = tier === 'go' || tier === 'both';
+
+  if (needsZen && catalog.zenModels.length > 0) {
+    options.push({
+      id: 'zen',
+      name: 'OpenCode Zen',
+      modelCount: modelsForTier(tier, 'zen', catalog.zenModels).length,
+    });
+  }
+  if (needsGo && catalog.goModels.length > 0) {
+    options.push({
+      id: 'go',
+      name: 'OpenCode Go',
+      modelCount: modelsForTier(tier, 'go', catalog.goModels).length,
+    });
+  }
+  for (const provider of catalog.localProviders) {
+    options.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount: provider.models.length,
+    });
+  }
+  return options;
+}
+
+async function resolveExposedProviders(
+  tier: SubscriptionTier,
+  opts: ServerCommandOptions,
+): Promise<string[] | null | undefined> {
+  if (opts.select) {
+    p.intro(pc.bold('  OpenCode Starter — Server Providers'));
+    p.log.info('Add providers to expose. Listed providers are removed when selected — like favorites.');
+    const spinner = p.spinner();
+    spinner.start('Loading providers...');
+    const catalog = await fetchProviderCatalog();
+    spinner.stop('');
+
+    const available = providerOptionsForTier(tier, catalog);
+    const picked = await selectServerProviders(available, getServerExposedProviders() ?? undefined);
+    if (!picked) return undefined;
+    setServerExposedProviders(picked);
+    p.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? 's' : ''} for future server runs.`);
+    return picked;
+  }
+
+  return getServerExposedProviders();
+}
+
+export async function runServerCommand(opts: ServerCommandOptions = {}): Promise<number> {
   let apiKey = resolveApiKey();
   if (!apiKey) {
     apiKey = await readFromCredentialStore((reason) => {
@@ -125,6 +196,7 @@ export async function runServerCommand(): Promise<number> {
     }
   }
 
+  apiKey = sanitizeCredential(apiKey) ?? '';
   if (!apiKey) {
     p.log.error('Missing OPENCODE_API_KEY. Run `opencode-starter claude` once to configure your key, or export OPENCODE_API_KEY.');
     return 1;
@@ -135,6 +207,9 @@ export async function runServerCommand(): Promise<number> {
     p.log.error('Missing subscription tier. Run `opencode-starter claude --setup` first.');
     return 1;
   }
+
+  const exposedProviders = await resolveExposedProviders(tier, opts);
+  if (exposedProviders === undefined) return 0;
 
   const mode = await askListenMode();
   if (!mode) return 0;
@@ -149,21 +224,52 @@ export async function runServerCommand(): Promise<number> {
   let models: ServerModelInfo[];
   try {
     models = await loadServerModels(tier);
+    if (exposedProviders) {
+      models = filterServerModelsByProviders(models, exposedProviders);
+    }
+    if (opts.favorites) {
+      const favorites = loadPreferences().favoriteModels ?? [];
+      if (favorites.length === 0) {
+        spinner.stop(pc.red('No favorite models configured'));
+        p.log.error('Run `opencode-starter models` to add favorites, or start without --favorites.');
+        return 1;
+      }
+      models = filterServerModelsByFavorites(models, favorites);
+      if (models.length === 0) {
+        spinner.stop(pc.red('No favorite models matched the current provider filter'));
+        p.log.error('Adjust favorites with `opencode-starter models` or run `opencode-starter server --select`.');
+        return 1;
+      }
+    }
+    if (models.length === 0) {
+      spinner.stop(pc.red('No models to expose'));
+      p.log.error('Run `opencode-starter server --select` to choose providers with available models.');
+      return 1;
+    }
+
     const localCount = models.filter(m => m.apiKey !== undefined).length;
-    spinner.stop(`Loaded ${models.length} models (${localCount} from local providers)`);
+    const summary = summarizeServerProviders(models);
+    const filterNote = exposedProviders
+      ? ` — ${exposedProviders.length} provider${exposedProviders.length !== 1 ? 's' : ''}`
+      : '';
+    const favoritesNote = opts.favorites ? ' — favorites only' : '';
+    spinner.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}`);
+    if (summary) p.log.info(summary);
   } catch (err) {
     spinner.stop(pc.red('Failed to load models'));
     console.error(pc.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
 
+  const gateway = opts.maskVendors ? { maskVendors: true as const } : undefined;
   const server = await startServer({
     host,
     port: 17645,
     apiKey,
     serverPassword,
-    catalog: createModelCatalog(models),
+    catalog: createGatewayModelCatalog(models, gateway),
     backends: BACKENDS,
+    gateway,
   });
 
   console.log('');
@@ -175,6 +281,15 @@ export async function runServerCommand(): Promise<number> {
     console.log(`  API key:    ${serverPassword}`);
   } else {
     console.log('  API key:    any non-empty value');
+  }
+  if (exposedProviders) {
+    console.log(pc.dim(`  Providers:  ${exposedProviders.join(', ')} (server --select to change)`));
+  }
+  if (opts.favorites) {
+    console.log(pc.dim('  Catalog:    favorite models only (server --favorites)'));
+  }
+  if (opts.maskVendors) {
+    console.log(pc.dim('  Discovery:  vendor-neutral gateway ids (display names stay readable)'));
   }
   console.log('');
   console.log(pc.dim('Press Ctrl+C to stop.'));

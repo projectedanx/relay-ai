@@ -13,7 +13,9 @@ export function resolveApiKey(): string | null {
   const key = process.env['OPENCODE_API_KEY'];
   // Treat empty string as missing — happens when .zshrc auto-load line runs
   // but the Keychain entry has been deleted (security command returns nothing)
-  return key?.trim() || null;
+  if (!key?.trim()) return null;
+  // First line only — users sometimes paste notes below the key in shell profiles
+  return key.trim().split(/\r?\n/)[0]?.trim() || null;
 }
 
 /** Restore first-party-like Claude Code behavior when routing through a proxy or gateway. */

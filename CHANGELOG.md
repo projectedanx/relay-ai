@@ -2,21 +2,11 @@
 
 ## [Unreleased]
 
-### Added
-- Bundled OpenCode SDK provider packages (Cerebras, Perplexity, Bedrock, Vertex, Azure, Together AI, DeepInfra, Alibaba, GitLab, Venice, and others) so any provider configured in OpenCode resolves at runtime without extra installs.
-
-### Changed
-- Local provider discovery trusts OpenCode's `api.npm` — removed the static SDK allowlist; any configured provider appears in the picker and routes through the Vercel AI SDK adapter (except `@ai-sdk/anthropic` passthrough and `@ai-sdk/openai-compatible` without a base URL).
-- `createLanguageModel` is async and dynamically imports the `create*` factory from whatever npm package OpenCode assigns.
-
-### Fixed
-- Local OpenAI providers: use OpenCode's `api.id` as the upstream model ID so catalog aliases (e.g. `gpt-5.5-fast` → `gpt-5.5`) don't hit `model_not_found` on the OpenAI API.
-- GPT-5.5 multi-turn reasoning: round-trip encrypted reasoning content via the Responses API without leaking SDK warnings into the Claude Code TUI.
-
 ## [0.3.0] - 2026-06-07
 
 ### Added
-- Local OpenCode provider discovery — launch Claude Code with any provider configured in OpenCode: Groq, Mistral, xAI, Google/Gemini, OpenAI, Anthropic-direct, Ollama, OpenRouter, and more. Includes full Gemini thinking + tool calls, OpenAI Responses-API models (GPT-5.4+, GPT-5.5, Codex, o-series), and Mistral.
+- Local OpenCode provider discovery — launch Claude Code with any provider configured in OpenCode: Groq, Mistral, xAI, Google/Gemini, OpenAI, Anthropic-direct, Ollama, OpenRouter, Cerebras, Perplexity, Bedrock, Vertex, and more. Includes full Gemini thinking + tool calls, OpenAI Responses-API models (GPT-5.4+, GPT-5.5, Codex, o-series), and Mistral.
+- Bundled OpenCode SDK provider packages (Cerebras, Perplexity, Bedrock, Vertex, Azure, Together AI, DeepInfra, Alibaba, GitLab, Venice, and others) so any provider configured in OpenCode resolves at runtime without extra installs.
 - `opencode-starter models` — interactive favorites manager (up to 10 models) for mid-session switching. With favorites set, Claude Code's `/model` switches live between your starting model and your favorites.
 - Model picker search and paginated browse for large catalogs; recent models per provider shown at the top of pickers.
 - Accurate `context_window` in synthetic `/v1/models` responses so Claude Code's status bar shows real remaining context.
@@ -24,9 +14,16 @@
 
 ### Changed
 - All providers route through a single Vercel AI SDK adapter (`ai` + `@ai-sdk/*`), which owns wire format, endpoint selection, and provider quirks (Gemini `thought_signature`, xAI multi-agent `/responses`, Mistral message ordering). Both the `claude` launch proxy and the `server` command use it; Anthropic-format models remain direct passthrough.
+- Local provider discovery trusts OpenCode's `api.npm` — removed the static SDK allowlist; any configured provider appears in the picker and routes through the SDK adapter (except `@ai-sdk/anthropic` passthrough and `@ai-sdk/openai-compatible` without a base URL).
+- `createLanguageModel` is async and dynamically imports the `create*` factory from whatever npm package OpenCode assigns.
+
+### Fixed
+- Local OpenAI providers: use OpenCode's `api.id` as the upstream model ID so catalog aliases (e.g. `gpt-5.5-fast` → `gpt-5.5`) don't hit `model_not_found` on the OpenAI API.
+- GPT-5.5 multi-turn reasoning: round-trip encrypted reasoning content via the Responses API without leaking SDK warnings into the Claude Code TUI.
 
 ### Docs
 - Note that Claude Code persists launched models to `~/.claude/settings.json` and may cache gateway catalogs — bare `claude` can show opencode-starter aliases after a session.
+- Updated README and CLAUDE.md for SDK adapter proxy naming, OpenCode-trusted discovery, `upstreamModelId`, and provider compatibility.
 
 ## [0.2.5] - 2026-06-05
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import pc3 from "picocolors";
-import * as p4 from "@clack/prompts";
+import pc4 from "picocolors";
+import * as p5 from "@clack/prompts";
 import { appendFileSync as appendFileSync2, readFileSync as readFileSync3, existsSync as existsSync4, realpathSync } from "fs";
 import { homedir as homedir5, tmpdir } from "os";
 import { join as join5 } from "path";
@@ -221,7 +221,8 @@ function detectConflicts() {
 }
 function resolveApiKey() {
   const key = process.env["OPENCODE_API_KEY"];
-  return key?.trim() || null;
+  if (!key?.trim()) return null;
+  return key.trim().split(/\r?\n/)[0]?.trim() || null;
 }
 function applyClaudeCodeThirdPartyCompat(env) {
   env["ENABLE_TOOL_SEARCH"] = "true";
@@ -289,6 +290,42 @@ async function isSecretServiceAvailable() {
 import { createServer } from "http";
 import { appendFileSync } from "fs";
 
+// src/server/vendor-mask.ts
+var VENDOR_REPLACEMENTS = [
+  [/deepseek/gi, "keespeed"],
+  [/qwen/gi, "newq"],
+  [/minimax/gi, "xaminim"],
+  [/kimi/gi, "imik"],
+  [/glm/gi, "mlg"],
+  [/mimo/gi, "omim"],
+  [/nemotron/gi, "notarmen"],
+  [/grok/gi, "korg"],
+  [/gemini/gi, "inimeg"],
+  [/openai/gi, "ianepo"],
+  [/google/gi, "elgoog"],
+  [/gpt/gi, "tpg"]
+];
+var FAMILY_REPLACEMENTS = [
+  [/m2\.(\d)/gi, "2m.$1"],
+  [/k2\.(\d)/gi, "2k.$1"],
+  [/hy3/gi, "3yh"]
+];
+function maskVendorText(text3) {
+  let out = text3;
+  for (const [pattern, replacement] of VENDOR_REPLACEMENTS) {
+    out = out.replace(pattern, replacement);
+  }
+  for (const [pattern, replacement] of FAMILY_REPLACEMENTS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+function maskGatewayModelId(aliasId) {
+  const sep = aliasId.indexOf("__");
+  if (sep === -1) return maskVendorText(aliasId);
+  return `${aliasId.slice(0, sep + 2)}${maskVendorText(aliasId.slice(sep + 2))}`;
+}
+
 // src/server/models.ts
 var CREATED_AT_ISO = "2025-01-01T00:00:00Z";
 var CREATED_AT_UNIX = 1735689600;
@@ -303,13 +340,6 @@ function formatAnthropicModelEntry(id, displayName, contextWindow) {
     max_input_tokens: maxInput
   };
 }
-function createModelCatalog(models) {
-  const byId = new Map(models.map((model) => [model.id, model]));
-  return {
-    get: (id) => byId.get(id),
-    list: () => [...models]
-  };
-}
 function formatAnthropicModelList(entries) {
   return {
     data: entries.map((entry) => formatAnthropicModelEntry(entry.id, entry.name, entry.contextWindow)),
@@ -318,10 +348,47 @@ function formatAnthropicModelList(entries) {
     last_id: entries.at(-1)?.id ?? null
   };
 }
-function formatAnthropicModels(models) {
+function gatewayProviderLabel(model) {
+  return model.providerLabel ?? (model.sourceBackend === "go" ? "OpenCode Go" : "OpenCode Zen");
+}
+function gatewayAliasId(model) {
+  return aliasModelId(model.id, gatewayProviderLabel(model));
+}
+function exposedGatewayAliasId(model, opts) {
+  const alias = gatewayAliasId(model);
+  return opts?.maskVendors ? maskGatewayModelId(alias) : alias;
+}
+function gatewayDisplayName(model, opts) {
+  if (!opts?.maskVendors) return model.name;
+  return `${model.name} (${gatewayProviderLabel(model)})`;
+}
+function formatGatewayAnthropicModels(models, opts) {
   return formatAnthropicModelList(
-    models.map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow }))
+    models.map((model) => ({
+      id: exposedGatewayAliasId(model, opts),
+      name: gatewayDisplayName(model, opts),
+      contextWindow: model.contextWindow
+    }))
   );
+}
+function createGatewayModelCatalog(models, opts) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    byId.set(model.id, model);
+    const alias = exposedGatewayAliasId(model, opts);
+    if (alias !== model.id) byId.set(alias, model);
+    if (opts?.maskVendors) {
+      const rawAlias = gatewayAliasId(model);
+      if (rawAlias !== alias) byId.set(rawAlias, model);
+    }
+  }
+  return {
+    get: (id) => byId.get(id),
+    list: () => [...models]
+  };
+}
+function upstreamModelId(model) {
+  return model.upstreamModelId ?? model.id;
 }
 function formatOpenAIModels(models) {
   return {
@@ -337,12 +404,34 @@ function formatOpenAIModels(models) {
 
 // src/upstream-forward.ts
 import { Readable } from "stream";
+
+// src/server/auth.ts
+function sanitizeCredential(value) {
+  if (!value) return null;
+  const firstLine = value.trim().split(/\r?\n/)[0]?.trim();
+  return firstLine || null;
+}
+function isAuthorized(request, serverPassword) {
+  if (serverPassword === null) return true;
+  const bearerToken = extractBearerToken(request.headers.get("authorization"));
+  if (bearerToken === serverPassword) return true;
+  return sanitizeCredential(request.headers.get("x-api-key")) === serverPassword;
+}
+function extractBearerToken(value) {
+  if (!value) return null;
+  const normalized = value.replace(/\r?\n/g, " ").trim();
+  const match = /^Bearer\s+(\S+)/i.exec(normalized);
+  return sanitizeCredential(match?.[1]);
+}
+
+// src/upstream-forward.ts
 function anthropicUpstreamHeaders(apiKey, stream = false) {
+  const key = sanitizeCredential(apiKey) ?? apiKey.trim();
   return {
     "Content-Type": "application/json",
     "anthropic-version": "2023-06-01",
-    Authorization: `Bearer ${apiKey}`,
-    "x-api-key": apiKey,
+    Authorization: `Bearer ${key}`,
+    "x-api-key": key,
     ...stream ? { Accept: "text/event-stream" } : {}
   };
 }
@@ -650,8 +739,8 @@ function translateMessages(messages, npm) {
       for (const b of blocks) {
         if (b.type === "text") parts.push({ type: "text", text: b.text ?? "" });
         else if (b.type === "image") {
-          const p5 = imagePart(b);
-          if (p5) parts.push(p5);
+          const p6 = imagePart(b);
+          if (p6) parts.push(p6);
         }
       }
       if (toolResults.length) {
@@ -731,7 +820,7 @@ function grabRoundTripSignature(part) {
   const md = part.providerMetadata;
   return md?.google?.thoughtSignature ?? md?.google?.thought_signature ?? md?.openai?.reasoningEncryptedContent ?? void 0;
 }
-async function writeAnthropicStream(fullStream, modelId, write, log4) {
+async function writeAnthropicStream(fullStream, modelId, write, log5) {
   const messageId = "msg_" + Date.now();
   let blockIndex = -1;
   let started = false;
@@ -862,7 +951,7 @@ async function writeAnthropicStream(fullStream, modelId, write, log4) {
         break;
       case "error": {
         const e = part.error;
-        log4?.(() => `sdk stream error: ${JSON.stringify(e?.data ?? part.error)}`);
+        log5?.(() => `sdk stream error: ${JSON.stringify(e?.data ?? part.error)}`);
         closeOpen();
         ensureStart();
         emit("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage });
@@ -878,9 +967,9 @@ async function writeAnthropicStream(fullStream, modelId, write, log4) {
   emit("message_delta", { type: "message_delta", delta: { stop_reason: finishReason, stop_sequence: null }, usage });
   emit("message_stop", { type: "message_stop" });
 }
-async function streamAnthropicResponse(model, params, modelId, write, log4) {
+async function streamAnthropicResponse(model, params, modelId, write, log5) {
   const result = streamText({ model, ...params });
-  await writeAnthropicStream(result.fullStream, modelId, write, log4);
+  await writeAnthropicStream(result.fullStream, modelId, write, log5);
 }
 async function generateAnthropicResponse(model, params, modelId) {
   const r = await generateText({ model, ...params });
@@ -1134,9 +1223,9 @@ function buildCatalogRoutes(startingRoute, favorites, resolveRoute, max = MAX_MO
 }
 
 // src/server/index.ts
-import pc from "picocolors";
+import pc2 from "picocolors";
 import { networkInterfaces } from "os";
-import * as p2 from "@clack/prompts";
+import * as p3 from "@clack/prompts";
 
 // src/config.ts
 import { dirname } from "path";
@@ -1255,6 +1344,18 @@ function setSavedServerPassword(password2) {
   config.server = {
     ...config.server ?? {},
     savedPassword: password2
+  };
+  writeConfig(config);
+}
+function getServerExposedProviders() {
+  const list = readConfig().server?.exposedProviders;
+  return list && list.length > 0 ? list : null;
+}
+function setServerExposedProviders(providerIds) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    exposedProviders: providerIds
   };
   writeConfig(config);
 }
@@ -1573,6 +1674,8 @@ function localProvidersToServerModels(localProviders) {
         name: model.name,
         isFree: false,
         brand: model.brand,
+        providerLabel: provider.name,
+        providerId: provider.id,
         sourceBackend: "zen",
         modelFormat: model.modelFormat,
         upstreamModelId: model.upstreamModelId,
@@ -1595,6 +1698,8 @@ function zenGoModelsToServerModels(models) {
       name: model.name,
       isFree: model.isFree,
       brand: model.brand,
+      providerLabel: model.sourceBackend === "go" ? "OpenCode Go" : "OpenCode Zen",
+      providerId: model.sourceBackend,
       sourceBackend: model.sourceBackend,
       modelFormat: model.modelFormat,
       cost: model.cost,
@@ -1669,21 +1774,6 @@ async function askSaveServerPassword() {
 
 // src/server/router.ts
 import { createServer as createServer2 } from "http";
-
-// src/server/auth.ts
-function isAuthorized(request, serverPassword) {
-  if (serverPassword === null) return true;
-  const bearerToken = extractBearerToken(request.headers.get("authorization"));
-  if (bearerToken === serverPassword) return true;
-  return request.headers.get("x-api-key") === serverPassword;
-}
-function extractBearerToken(value) {
-  if (!value) return null;
-  const match = /^Bearer\s+(.+)$/i.exec(value.trim());
-  return match?.[1] ?? null;
-}
-
-// src/server/router.ts
 async function startServer(options) {
   silenceSdkWarnings();
   const server = createServer2((req, res) => {
@@ -1726,7 +1816,7 @@ async function routeRequest(req, res, options) {
       return;
     }
     if (req.method === "GET" && pathname === "/anthropic/v1/models") {
-      sendJson2(res, 200, formatAnthropicModels(options.catalog.list()));
+      sendJson2(res, 200, formatGatewayAnthropicModels(options.catalog.list(), options.gateway));
       return;
     }
     if (req.method === "GET" && pathname === "/openai/v1/models") {
@@ -1757,7 +1847,7 @@ async function handleAnthropicMessages(req, res, options) {
   if (model.modelFormat === "anthropic") {
     const messagesUrl = model.baseUrl ? `${model.baseUrl}/v1/messages` : `${backendFor(options, model).baseUrl}/v1/messages`;
     const apiKey = model.apiKey ?? options.apiKey;
-    await forwardJson(res, messagesUrl, body, apiKey);
+    await forwardJson(res, messagesUrl, { ...body, model: upstreamModelId(model) }, apiKey);
     return;
   }
   if (model.modelFormat === "openai") {
@@ -1768,7 +1858,7 @@ async function handleAnthropicMessages(req, res, options) {
     const apiKey = model.apiKey ?? options.apiKey;
     const languageModel = await createLanguageModel({
       npm: model.npm,
-      modelId: model.upstreamModelId ?? model.id,
+      modelId: upstreamModelId(model),
       apiKey,
       baseURL: model.apiBaseUrl,
       providerId: model.sourceBackend
@@ -1782,10 +1872,12 @@ async function handleAnthropicMessages(req, res, options) {
           "Cache-Control": "no-cache",
           "Connection": "keep-alive"
         });
-        await streamAnthropicResponse(languageModel, params, model.id, (chunk) => res.write(chunk));
+        const clientModel = typeof body.model === "string" ? body.model : model.id;
+        await streamAnthropicResponse(languageModel, params, clientModel, (chunk) => res.write(chunk));
         res.end();
       } else {
-        const anthropicResponse = await generateAnthropicResponse(languageModel, params, model.id);
+        const clientModel = typeof body.model === "string" ? body.model : model.id;
+        const anthropicResponse = await generateAnthropicResponse(languageModel, params, clientModel);
         sendJson2(res, 200, anthropicResponse);
       }
     } catch (err) {
@@ -1850,16 +1942,125 @@ function toRequest(req) {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) {
-      for (const item of value) headers.append(name, item);
+      for (const item of value) headers.append(name, sanitizeIncomingHeaderValue(item));
     } else if (value !== void 0) {
-      headers.set(name, value);
+      headers.set(name, sanitizeIncomingHeaderValue(value));
     }
   }
   return new Request("http://localhost/", { headers });
 }
+function sanitizeIncomingHeaderValue(value) {
+  return value.replace(/\r?\n/g, " ").trim();
+}
 function sendJson2(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
+}
+
+// src/server/catalog-filter.ts
+function filterServerModelsByProviders(models, providerIds) {
+  if (!providerIds || providerIds.length === 0) return models;
+  const allowed = new Set(providerIds);
+  return models.filter((model) => model.providerId && allowed.has(model.providerId));
+}
+function filterServerModelsByFavorites(models, favorites) {
+  if (favorites.length === 0) return [];
+  const allowed = new Set(favorites.map((fav) => `${fav.providerId}:${fav.modelId}`));
+  return models.filter((model) => model.providerId && allowed.has(`${model.providerId}:${model.id}`));
+}
+function summarizeServerProviders(models) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    const key = model.providerLabel ?? model.providerId ?? "unknown";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([name, count]) => `${name} (${count})`).join(", ");
+}
+
+// src/server/provider-select.ts
+import pc from "picocolors";
+import * as p2 from "@clack/prompts";
+function isSelected(list, id) {
+  return list.includes(id);
+}
+function resolveInitialServerProviders(initial, available) {
+  if (!initial?.length) return [];
+  return initial.filter((id) => available.some((provider) => provider.id === id));
+}
+async function selectServerProviders(available, initial) {
+  if (available.length === 0) {
+    p2.log.warn("No providers available to expose.");
+    return null;
+  }
+  let selected = resolveInitialServerProviders(initial, available);
+  const lookup = new Map(available.map((provider) => [provider.id, provider]));
+  while (true) {
+    const options = [];
+    for (let i = 0; i < selected.length; i++) {
+      const id = selected[i];
+      const provider = lookup.get(id);
+      const label = provider ? `\u2605 ${provider.name}` : pc.dim(`\u2605 ${id} \u2014 provider gone`);
+      const hint = provider ? `${provider.modelCount} model${provider.modelCount !== 1 ? "s" : ""}` : "select to remove";
+      options.push({ value: `prov-${i}`, label, hint: "select to remove" });
+    }
+    const unselected = available.filter((provider) => !isSelected(selected, provider.id));
+    options.push({
+      value: "__add__",
+      label: unselected.length === 0 ? pc.dim("+ Add a provider \u2192 (all providers selected)") : "+ Add a provider \u2192",
+      hint: unselected.length === 0 ? "" : `${unselected.length} more available`
+    });
+    options.push({ value: "__all__", label: "Expose all providers", hint: `${available.length} total` });
+    if (selected.length > 0) {
+      options.push({ value: "__clear__", label: "Clear all", hint: "start over" });
+    }
+    options.push({ value: "__done__", label: "Done", hint: "" });
+    const header = selected.length === 0 ? `Exposed providers (0/${available.length}) \u2014 add providers to expose` : `Exposed providers (${selected.length}/${available.length}) \u2014 select to stop exposing`;
+    const choice = await p2.select({
+      message: header,
+      options,
+      initialValue: "__done__"
+    });
+    if (p2.isCancel(choice) || choice === "__done__") {
+      if (selected.length === 0) {
+        p2.log.warn("Select at least one provider to expose.");
+        continue;
+      }
+      break;
+    }
+    if (choice === "__all__") {
+      selected = available.map((provider) => provider.id);
+      p2.log.success(`Exposing all ${available.length} providers.`);
+      continue;
+    }
+    if (choice === "__clear__") {
+      selected = [];
+      p2.log.success("Cleared provider list \u2014 add the ones you want to expose.");
+      continue;
+    }
+    if (choice === "__add__") {
+      if (unselected.length === 0) continue;
+      const picked = await p2.select({
+        message: "Which provider?",
+        options: unselected.map((provider) => ({
+          value: provider.id,
+          label: provider.name,
+          hint: `${provider.modelCount} model${provider.modelCount !== 1 ? "s" : ""}`
+        }))
+      });
+      if (p2.isCancel(picked)) continue;
+      selected = [...selected, picked];
+      continue;
+    }
+    if (choice.startsWith("prov-")) {
+      const idx = parseInt(choice.slice(5), 10);
+      const id = selected[idx];
+      if (!id) continue;
+      const provider = lookup.get(id);
+      selected = selected.filter((_, i) => i !== idx);
+      p2.log.success(`Removed ${provider?.name ?? id}.`);
+    }
+  }
+  return selected;
 }
 
 // src/server/index.ts
@@ -1929,62 +2130,137 @@ async function loadServerModels(tier) {
     if (localProviders !== null) {
       models.push(...localProvidersToServerModels(localProviders));
     } else {
-      p2.log.info("No local providers found \u2014 using cloud models only");
+      p3.log.info("No local providers found \u2014 using cloud models only");
     }
   } catch {
-    p2.log.info("No local providers found \u2014 using cloud models only");
+    p3.log.info("No local providers found \u2014 using cloud models only");
   }
   return models;
 }
-async function runServerCommand() {
+function providerOptionsForTier(tier, catalog) {
+  const options = [];
+  const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
+  const needsGo = tier === "go" || tier === "both";
+  if (needsZen && catalog.zenModels.length > 0) {
+    options.push({
+      id: "zen",
+      name: "OpenCode Zen",
+      modelCount: modelsForTier(tier, "zen", catalog.zenModels).length
+    });
+  }
+  if (needsGo && catalog.goModels.length > 0) {
+    options.push({
+      id: "go",
+      name: "OpenCode Go",
+      modelCount: modelsForTier(tier, "go", catalog.goModels).length
+    });
+  }
+  for (const provider of catalog.localProviders) {
+    options.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount: provider.models.length
+    });
+  }
+  return options;
+}
+async function resolveExposedProviders(tier, opts) {
+  if (opts.select) {
+    p3.intro(pc2.bold("  OpenCode Starter \u2014 Server Providers"));
+    p3.log.info("Add providers to expose. Listed providers are removed when selected \u2014 like favorites.");
+    const spinner3 = p3.spinner();
+    spinner3.start("Loading providers...");
+    const catalog = await fetchProviderCatalog();
+    spinner3.stop("");
+    const available = providerOptionsForTier(tier, catalog);
+    const picked = await selectServerProviders(available, getServerExposedProviders() ?? void 0);
+    if (!picked) return void 0;
+    setServerExposedProviders(picked);
+    p3.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? "s" : ""} for future server runs.`);
+    return picked;
+  }
+  return getServerExposedProviders();
+}
+async function runServerCommand(opts = {}) {
   let apiKey = resolveApiKey();
   if (!apiKey) {
     apiKey = await readFromCredentialStore((reason) => {
-      p2.log.warn(`Credential store unavailable \u2014 ${reason}`);
+      p3.log.warn(`Credential store unavailable \u2014 ${reason}`);
     });
     if (apiKey) {
       const isMac = process.platform === "darwin";
       const isWindows3 = process.platform === "win32";
       const storeName = isMac ? "macOS Keychain" : isWindows3 ? "Windows Credential Manager" : "Secret Service";
-      p2.log.success(`Found key in ${storeName}`);
+      p3.log.success(`Found key in ${storeName}`);
     }
   }
+  apiKey = sanitizeCredential(apiKey) ?? "";
   if (!apiKey) {
-    p2.log.error("Missing OPENCODE_API_KEY. Run `opencode-starter claude` once to configure your key, or export OPENCODE_API_KEY.");
+    p3.log.error("Missing OPENCODE_API_KEY. Run `opencode-starter claude` once to configure your key, or export OPENCODE_API_KEY.");
     return 1;
   }
   const tier = getSubscriptionTier();
   if (!tier) {
-    p2.log.error("Missing subscription tier. Run `opencode-starter claude --setup` first.");
+    p3.log.error("Missing subscription tier. Run `opencode-starter claude --setup` first.");
     return 1;
   }
+  const exposedProviders = await resolveExposedProviders(tier, opts);
+  if (exposedProviders === void 0) return 0;
   const mode = await askListenMode();
   if (!mode) return 0;
   const serverPassword = await getServerPasswordForMode(mode);
   if (serverPassword === void 0) return 0;
   const host = mode === "network" ? "0.0.0.0" : "127.0.0.1";
-  const spinner3 = p2.spinner();
+  const spinner3 = p3.spinner();
   spinner3.start("Fetching available models...");
   let models;
   try {
     models = await loadServerModels(tier);
+    if (exposedProviders) {
+      models = filterServerModelsByProviders(models, exposedProviders);
+    }
+    if (opts.favorites) {
+      const favorites = loadPreferences().favoriteModels ?? [];
+      if (favorites.length === 0) {
+        spinner3.stop(pc2.red("No favorite models configured"));
+        p3.log.error("Run `opencode-starter models` to add favorites, or start without --favorites.");
+        return 1;
+      }
+      models = filterServerModelsByFavorites(models, favorites);
+      if (models.length === 0) {
+        spinner3.stop(pc2.red("No favorite models matched the current provider filter"));
+        p3.log.error("Adjust favorites with `opencode-starter models` or run `opencode-starter server --select`.");
+        return 1;
+      }
+    }
+    if (models.length === 0) {
+      spinner3.stop(pc2.red("No models to expose"));
+      p3.log.error("Run `opencode-starter server --select` to choose providers with available models.");
+      return 1;
+    }
     const localCount = models.filter((m) => m.apiKey !== void 0).length;
-    spinner3.stop(`Loaded ${models.length} models (${localCount} from local providers)`);
+    const summary = summarizeServerProviders(models);
+    const filterNote = exposedProviders ? ` \u2014 ${exposedProviders.length} provider${exposedProviders.length !== 1 ? "s" : ""}` : "";
+    const favoritesNote = opts.favorites ? " \u2014 favorites only" : "";
+    spinner3.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}`);
+    if (summary) p3.log.info(summary);
   } catch (err) {
-    spinner3.stop(pc.red("Failed to load models"));
-    console.error(pc.red(String(err instanceof Error ? err.message : err)));
+    spinner3.stop(pc2.red("Failed to load models"));
+    console.error(pc2.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
+  const gateway = opts.maskVendors ? { maskVendors: true } : void 0;
   const server = await startServer({
     host,
     port: 17645,
     apiKey,
     serverPassword,
-    catalog: createModelCatalog(models),
-    backends: BACKENDS
+    catalog: createGatewayModelCatalog(models, gateway),
+    backends: BACKENDS,
+    gateway
   });
   console.log("");
-  console.log(pc.bold(pc.green("OpenCode Starter server running")));
+  console.log(pc2.bold(pc2.green("OpenCode Starter server running")));
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai`);
   if (mode === "network") {
@@ -1993,23 +2269,32 @@ async function runServerCommand() {
   } else {
     console.log("  API key:    any non-empty value");
   }
+  if (exposedProviders) {
+    console.log(pc2.dim(`  Providers:  ${exposedProviders.join(", ")} (server --select to change)`));
+  }
+  if (opts.favorites) {
+    console.log(pc2.dim("  Catalog:    favorite models only (server --favorites)"));
+  }
+  if (opts.maskVendors) {
+    console.log(pc2.dim("  Discovery:  vendor-neutral gateway ids (display names stay readable)"));
+  }
   console.log("");
-  console.log(pc.dim("Press Ctrl+C to stop."));
+  console.log(pc2.dim("Press Ctrl+C to stop."));
   await waitForShutdown();
   await server.close();
   return 0;
 }
 
 // src/prompts.ts
-import * as p3 from "@clack/prompts";
-import pc2 from "picocolors";
+import * as p4 from "@clack/prompts";
+import pc3 from "picocolors";
 function modelLabel(model, showBackendBadge = false) {
   if (model.modelFormat === "unsupported") {
-    return pc2.dim(`${model.name} (not yet supported)`);
+    return pc3.dim(`${model.name} (not yet supported)`);
   }
   if (model.isFree) {
     const tag = showBackendBadge ? "(free \xB7 Zen)" : "(free)";
-    return pc2.green(`${model.name} ${tag}`);
+    return pc3.green(`${model.name} ${tag}`);
   }
   return model.name;
 }
@@ -2022,7 +2307,7 @@ function modelHint(model) {
   return parts.join(" \xB7 ");
 }
 async function askSubscriptionTier() {
-  const tier = await p3.select({
+  const tier = await p4.select({
     message: "What OpenCode subscription do you have?",
     options: [
       {
@@ -2048,8 +2333,8 @@ async function askSubscriptionTier() {
     ],
     initialValue: "free"
   });
-  if (p3.isCancel(tier)) {
-    p3.cancel("Cancelled.");
+  if (p4.isCancel(tier)) {
+    p4.cancel("Cancelled.");
     return null;
   }
   return tier;
@@ -2124,12 +2409,12 @@ async function pickModelFromPagedList(list, toOption, messagePrefix, initialMode
       options.push({ value: SWITCH_SEARCH, label: "\u2190 New search", hint: "" });
     }
     const initialValue = (initialModelId && pageItems.some((m) => m.id === initialModelId) ? initialModelId : pageItems[0]?.id) ?? options[0]?.value;
-    const picked = await p3.select({
+    const picked = await p4.select({
       message: `${messagePrefix} (page ${currentPage + 1} of ${totalPages})`,
       options,
       initialValue
     });
-    if (p3.isCancel(picked)) return "menu";
+    if (p4.isCancel(picked)) return "menu";
     const choice = String(picked);
     if (choice === PAGE_PREV) {
       page = currentPage - 1;
@@ -2150,7 +2435,7 @@ async function selectLargeCatalog(models, browseList, toOption, message, initial
   let mode = "choose";
   while (true) {
     if (mode === "choose") {
-      const method = await p3.select({
+      const method = await p4.select({
         message: `${message} (${models.length} available)`,
         options: [
           { value: MODE_SEARCH, label: "Search models", hint: "Filter by name, id, or brand" },
@@ -2161,8 +2446,8 @@ async function selectLargeCatalog(models, browseList, toOption, message, initial
           }
         ]
       });
-      if (p3.isCancel(method)) {
-        p3.cancel("Cancelled.");
+      if (p4.isCancel(method)) {
+        p4.cancel("Cancelled.");
         return null;
       }
       mode = method === MODE_BROWSE ? "browse" : "search";
@@ -2187,17 +2472,17 @@ async function selectLargeCatalog(models, browseList, toOption, message, initial
       if (isSelectedModel(picked)) return picked;
       continue;
     }
-    const searchInput = await p3.text({
+    const searchInput = await p4.text({
       message: `Search models (${models.length} available):`,
       placeholder: "e.g. claude, sonnet, llama"
     });
-    if (p3.isCancel(searchInput)) {
+    if (p4.isCancel(searchInput)) {
       mode = "choose";
       continue;
     }
     const matched = filterModelsBySearch(browseList, String(searchInput));
     if (matched.length === 0) {
-      p3.log.warn("No models match \u2014 try a different search");
+      p4.log.warn("No models match \u2014 try a different search");
       continue;
     }
     const result = await pickModelFromPagedList(
@@ -2225,13 +2510,13 @@ async function selectModelWithSearch(models, toOption, message, initialModelId, 
   if (models.length <= MODEL_SEARCH_THRESHOLD) {
     const options = models.map(toOption);
     const initialValue = initialModelId && options.some((o) => o.value === initialModelId) ? initialModelId : options[0]?.value;
-    const picked = await p3.select({
+    const picked = await p4.select({
       message,
       options,
       initialValue
     });
-    if (p3.isCancel(picked)) {
-      p3.cancel("Cancelled.");
+    if (p4.isCancel(picked)) {
+      p4.cancel("Cancelled.");
       return null;
     }
     const selected = models.find((m) => m.id === String(picked));
@@ -2242,8 +2527,8 @@ async function selectModelWithSearch(models, toOption, message, initialModelId, 
 }
 function noteEnvConflicts(conflicts) {
   if (conflicts.length === 0) return;
-  const lines = conflicts.map((c) => `  ${pc2.dim(c.name)}=${pc2.dim(c.value)}`).join("\n");
-  p3.note(lines, pc2.yellow("Env vars that will be temporarily overridden:"));
+  const lines = conflicts.map((c) => `  ${pc3.dim(c.name)}=${pc3.dim(c.value)}`).join("\n");
+  p4.note(lines, pc3.yellow("Env vars that will be temporarily overridden:"));
 }
 function modelToOption(model, hint) {
   return {
@@ -2269,13 +2554,13 @@ async function pickLocalModel(provider, conflicts, prefs) {
       ...recentModels.map((m) => modelToOption(m, "recent")),
       { value: BROWSE_ALL, label: "Browse all models \u2192", hint: `${provider.models.length} available` }
     ];
-    const picked = await p3.select({
+    const picked = await p4.select({
       message: "Which model?",
       options,
       initialValue: recentModels[0].id
     });
-    if (p3.isCancel(picked)) {
-      p3.cancel("Cancelled.");
+    if (p4.isCancel(picked)) {
+      p4.cancel("Cancelled.");
       return null;
     }
     if (String(picked) === BROWSE_ALL) {
@@ -2291,21 +2576,21 @@ async function pickLocalModel(provider, conflicts, prefs) {
     selectedModel = browsed;
   }
   noteEnvConflicts(conflicts);
-  const confirmed = await p3.confirm({
-    message: `Launch Claude Code \xB7 ${pc2.bold(selectedModel.id)} via ${pc2.bold(provider.name)}?`,
+  const confirmed = await p4.confirm({
+    message: `Launch Claude Code \xB7 ${pc3.bold(selectedModel.id)} via ${pc3.bold(provider.name)}?`,
     initialValue: true
   });
-  if (p3.isCancel(confirmed) || !confirmed) {
-    p3.cancel("Cancelled.");
+  if (p4.isCancel(confirmed) || !confirmed) {
+    p4.cancel("Cancelled.");
     return null;
   }
-  p3.outro(pc2.green("Launching..."));
+  p4.outro(pc3.green("Launching..."));
   return selectedModel;
 }
 async function runWizard(prefs, modelsByBackend, conflicts, tier) {
   let selectorBackendId = null;
   if (tier === "both") {
-    const backendId = await p3.select({
+    const backendId = await p4.select({
       message: "Which backend?",
       options: [
         { value: "zen", label: "OpenCode Zen", hint: "66+ models, free tier available" },
@@ -2313,8 +2598,8 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
       ],
       initialValue: prefs.lastBackend ?? "zen"
     });
-    if (p3.isCancel(backendId)) {
-      p3.cancel("Cancelled.");
+    if (p4.isCancel(backendId)) {
+      p4.cancel("Cancelled.");
       return null;
     }
     selectorBackendId = backendId;
@@ -2346,7 +2631,7 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
     ...sortedBrands.flatMap((brand) => byBrand.get(brand) ?? [])
   ];
   if (orderedSelectable.length === 0) {
-    p3.cancel("No models available for this backend and subscription tier.");
+    p4.cancel("No models available for this backend and subscription tier.");
     return null;
   }
   const selectedModel = await selectModelWithSearch(
@@ -2363,19 +2648,19 @@ async function runWizard(prefs, modelsByBackend, conflicts, tier) {
       return acc;
     }, {});
     const summary = Object.entries(brandCounts).map(([b, c]) => `${b} (${c})`).join(", ");
-    p3.log.info(pc2.dim(`Not yet supported: ${summary} \u2014 need API format translation`));
+    p4.log.info(pc3.dim(`Not yet supported: ${summary} \u2014 need API format translation`));
   }
   const backend = BACKENDS[selectedModel.sourceBackend];
   noteEnvConflicts(conflicts);
-  const confirmed = await p3.confirm({
-    message: `Launch Claude Code \xB7 ${pc2.bold(selectedModel.id)} via ${pc2.bold(backend.name)}?`,
+  const confirmed = await p4.confirm({
+    message: `Launch Claude Code \xB7 ${pc3.bold(selectedModel.id)} via ${pc3.bold(backend.name)}?`,
     initialValue: true
   });
-  if (p3.isCancel(confirmed) || !confirmed) {
-    p3.cancel("Cancelled.");
+  if (p4.isCancel(confirmed) || !confirmed) {
+    p4.cancel("Cancelled.");
     return null;
   }
-  p3.outro(pc2.green("Launching..."));
+  p4.outro(pc3.green("Launching..."));
   return { backend, model: selectedModel };
 }
 
@@ -2402,7 +2687,10 @@ function emptyParsed(command) {
     dryRun: false,
     setup: false,
     trace: false,
-    claudeArgs: []
+    claudeArgs: [],
+    serverSelect: false,
+    serverFavorites: false,
+    serverMaskVendors: false
   };
 }
 function parseArgs(args) {
@@ -2419,6 +2707,9 @@ function parseArgs(args) {
     for (const arg of rest) {
       if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
       else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
+      else if (arg === "--select") parsed2.serverSelect = true;
+      else if (arg === "--favorites") parsed2.serverFavorites = true;
+      else if (arg === "--mask-vendors") parsed2.serverMaskVendors = true;
       else if (!parsed2.error) parsed2.error = `Unknown server option: ${arg}`;
     }
     return parsed2;
@@ -2458,28 +2749,28 @@ function parseArgs(args) {
   return parsed;
 }
 function rootHelpText() {
-  return `${pc3.bold("opencode-starter")} v${VERSION}
+  return `${pc4.bold("opencode-starter")} v${VERSION}
 Launch AI coding tools with OpenCode Zen, Go, or local providers (Groq, Mistral,
 OpenAI, Gemini, Ollama, and more).
 
-${pc3.bold("Usage:")}
+${pc4.bold("Usage:")}
   opencode-starter claude [starter-options] [claude-flags]
   opencode-starter models
   opencode-starter server
   opencode-starter --help
   opencode-starter --version
 
-${pc3.bold("Commands:")}
+${pc4.bold("Commands:")}
   claude      Launch Claude Code \u2014 cloud Zen/Go or local OpenCode providers
   models      Manage favorite models for mid-session /model switching (max ${MAX_MODEL_CATALOG})
   server      Run a foreground API gateway (Zen, Go, and local providers)
   codex       planned
 
-${pc3.bold("Migration:")}
+${pc4.bold("Migration:")}
   Bare opencode-starter prints this help instead of launching Claude Code.
   Use opencode-starter claude for the wizard and launcher.
 
-${pc3.bold("Examples:")}
+${pc4.bold("Examples:")}
   opencode-starter claude
   opencode-starter models
   opencode-starter server
@@ -2488,37 +2779,37 @@ ${pc3.bold("Examples:")}
   opencode-starter claude -- --print "hello"`;
 }
 function claudeHelpText() {
-  return `${pc3.bold("opencode-starter claude")} v${VERSION}
+  return `${pc4.bold("opencode-starter claude")} v${VERSION}
 Launch Claude Code with OpenCode Zen, Go, or local providers as the API backend.
 
-${pc3.bold("Usage:")}
+${pc4.bold("Usage:")}
   opencode-starter claude [starter-options] [claude-flags]
   opencode-starter claude --help
   opencode-starter claude --version
 
-${pc3.bold("Starter options:")}
+${pc4.bold("Starter options:")}
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --setup      Re-configure your subscription tier
   --trace      Write debug logs to /tmp and show errors on exit
   --help       Show this command help
   --version    Show version
 
-${pc3.bold("Providers:")}
+${pc4.bold("Providers:")}
   Cloud (Zen/Go)  Requires OPENCODE_API_KEY \u2014 get one at https://opencode.ai/auth
   Local           Requires OpenCode CLI with providers configured (Groq, Mistral,
                   OpenAI, Gemini, Ollama, etc.). Shown in the wizard when available.
 
-${pc3.bold("Model switching:")}
+${pc4.bold("Model switching:")}
   Run opencode-starter models to save favorites (max ${MAX_MODEL_CATALOG}).
   When favorites exist, launch starts a multi-route proxy and Claude Code /model
   lists your starting model plus favorites for live switching.
   With no favorites, launch uses a single model as before.
 
-${pc3.bold("Note:")}
+${pc4.bold("Note:")}
   Claude Code may save the launched model to ~/.claude/settings.json.
   Bare claude later can still show that model \u2014 reset with claude --model sonnet.
 
-${pc3.bold("Examples:")}
+${pc4.bold("Examples:")}
   opencode-starter claude
   opencode-starter claude -c
   opencode-starter claude --resume abc-123
@@ -2530,47 +2821,58 @@ ${pc3.bold("Examples:")}
   opencode-starter claude -- --dangerously-skip-permissions`;
 }
 function serverHelpText() {
-  return `${pc3.bold("opencode-starter server")} v${VERSION}
+  return `${pc4.bold("opencode-starter server")} v${VERSION}
 Run a foreground API gateway for Zen, Go, and local OpenCode providers.
 
-${pc3.bold("Usage:")}
+${pc4.bold("Usage:")}
   opencode-starter server
+  opencode-starter server --select
+  opencode-starter server --favorites
+  opencode-starter server --select --favorites
+  opencode-starter server --mask-vendors
   opencode-starter server --help
   opencode-starter server --version
 
-${pc3.bold("Behavior:")}
+${pc4.bold("Options:")}
+  --select        Pick which providers to expose (saved for future runs)
+  --favorites     Expose only models saved via opencode-starter models
+  --mask-vendors  Sanitize gateway model ids for Desktop discovery (names stay readable)
+
+${pc4.bold("Behavior:")}
   Loads Zen/Go models plus configured local providers into one catalog.
+  When providers were chosen with --select, later server runs reuse that filter.
+  --favorites narrows the catalog to your saved favorite models.
   Prompts for local-only (127.0.0.1) or network (0.0.0.0) listen mode.
   Binds to port 17645. Network mode asks for a server password.
   Server password is saved only if the user chooses to save it.
   Server host and port are not saved.
 
-${pc3.bold("Endpoints:")}
+${pc4.bold("Endpoints:")}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
   OpenAI-compatible:     OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
   API key: use anything locally; use the server password in network mode.`;
 }
 function modelsHelpText() {
-  return `${pc3.bold("opencode-starter models")} v${VERSION}
+  return `${pc4.bold("opencode-starter models")} v${VERSION}
 Manage favorite models for mid-session switching in Claude Code.
 
-${pc3.bold("Usage:")}
+${pc4.bold("Usage:")}
   opencode-starter models
   opencode-starter models --help
   opencode-starter models --version
 
-${pc3.bold("Behavior:")}
+${pc4.bold("Behavior:")}
   Opens an interactive manager to add or remove favorites.
   Pick from Zen, Go, or any configured local OpenCode provider.
   Favorites are saved to ~/.opencode-starter/config.json (max ${MAX_MODEL_CATALOG}).
 
-${pc3.bold("How it works:")}
+${pc4.bold("How it works:")}
   When favorites exist, opencode-starter claude starts a multi-route catalog proxy.
   Claude Code /model lists your starting model plus favorites \u2014 switch live
   without restarting. Mix cloud and local favorites in one session.
   With no favorites, launch uses a single model as before.
 
-${pc3.bold("Examples:")}
+${pc4.bold("Examples:")}
   opencode-starter models
   opencode-starter claude    # switch menu active when favorites are set`;
 }
@@ -2583,11 +2885,11 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
   let proxyHandle;
   try {
     proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
-    p4.log.info(
-      `Switch menu active \u2014 proxy on port ${proxyHandle.port} ` + pc3.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? "s" : ""} in /model)`)
+    p5.log.info(
+      `Switch menu active \u2014 proxy on port ${proxyHandle.port} ` + pc4.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? "s" : ""} in /model)`)
     );
   } catch (err) {
-    p4.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
+    p5.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   const childEnv = buildChildEnv(
@@ -2600,7 +2902,7 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
   );
   const debugLogPath = join5(tmpdir(), "opencode-starter-debug.log");
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
-  if (trace) p4.log.info(`Debug log: ${debugLogPath}`);
+  if (trace) p5.log.info(`Debug log: ${debugLogPath}`);
   const exitCode = await launchClaude(childEnv, startingRoute.aliasId, [...traceArgs, ...claudeArgs]);
   proxyHandle.close();
   if (trace) printTraceLog(debugLogPath);
@@ -2608,54 +2910,54 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
 }
 function printTraceLog(debugLogPath) {
   if (!existsSync4(debugLogPath)) return;
-  const log4 = readFileSync3(debugLogPath, "utf8");
-  const errorLines = log4.split("\n").filter(
+  const log5 = readFileSync3(debugLogPath, "utf8");
+  const errorLines = log5.split("\n").filter(
     (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
   );
-  console.log("\n" + pc3.bold(pc3.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
+  console.log("\n" + pc4.bold(pc4.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
   if (errorLines.length > 0) {
-    errorLines.slice(0, 30).forEach((l) => console.log(pc3.dim(l)));
+    errorLines.slice(0, 30).forEach((l) => console.log(pc4.dim(l)));
   } else {
-    console.log(pc3.dim("(no errors found in debug log)"));
+    console.log(pc4.dim("(no errors found in debug log)"));
   }
-  console.log(pc3.dim(`Full log: ${debugLogPath}`));
+  console.log(pc4.dim(`Full log: ${debugLogPath}`));
 }
 function printDryRun(backendName, modelId, baseUrl, modelFormat, claudeArgs, conflicts, disableExperimentalBetas, npm) {
   console.log("");
-  console.log(pc3.bold(pc3.cyan("  DRY RUN \u2014 would execute:")));
+  console.log(pc4.bold(pc4.cyan("  DRY RUN \u2014 would execute:")));
   console.log("");
   const claudeCmd = ["claude", "--model", modelId, ...claudeArgs].join(" ");
-  console.log(`  ${pc3.bold("Command:")}  ${claudeCmd}`);
-  console.log(`  ${pc3.bold("Backend:")}  ${backendName}`);
+  console.log(`  ${pc4.bold("Command:")}  ${claudeCmd}`);
+  console.log(`  ${pc4.bold("Backend:")}  ${backendName}`);
   if (modelFormat === "openai") {
-    console.log(`  ${pc3.bold("Proxy:")}    would start local SDK adapter proxy ${pc3.dim("(Vercel AI SDK)")}`);
-    if (npm) console.log(`             ${pc3.dim(`npm: ${npm}`)}`);
+    console.log(`  ${pc4.bold("Proxy:")}    would start local SDK adapter proxy ${pc4.dim("(Vercel AI SDK)")}`);
+    if (npm) console.log(`             ${pc4.dim(`npm: ${npm}`)}`);
   }
   console.log("");
-  console.log(`  ${pc3.bold("Env vars SET:")}`);
+  console.log(`  ${pc4.bold("Env vars SET:")}`);
   if (modelFormat === "openai") {
-    console.log(`    ANTHROPIC_BASE_URL=http://127.0.0.1:<port>  ${pc3.dim("(local proxy)")}`);
+    console.log(`    ANTHROPIC_BASE_URL=http://127.0.0.1:<port>  ${pc4.dim("(local proxy)")}`);
   } else {
     console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
   }
   console.log(`    ANTHROPIC_API_KEY=<your OPENCODE_API_KEY>`);
   console.log(`    ANTHROPIC_MODEL=${modelId}`);
   if (disableExperimentalBetas) {
-    console.log(`    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1  ${pc3.dim("(direct upstream \u2014 strips beta headers)")}`);
+    console.log(`    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1  ${pc4.dim("(direct upstream \u2014 strips beta headers)")}`);
   } else {
-    console.log(`    ${pc3.dim("(experimental betas enabled \u2014 tool search via local proxy)")}`);
+    console.log(`    ${pc4.dim("(experimental betas enabled \u2014 tool search via local proxy)")}`);
   }
-  console.log(`    ENABLE_TOOL_SEARCH=true  ${pc3.dim("(defer MCP tools like native Claude Code)")}`);
-  console.log(`    CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=0  ${pc3.dim("(keep full system prompt on proxy routes)")}`);
+  console.log(`    ENABLE_TOOL_SEARCH=true  ${pc4.dim("(defer MCP tools like native Claude Code)")}`);
+  console.log(`    CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=0  ${pc4.dim("(keep full system prompt on proxy routes)")}`);
   console.log("");
   if (conflicts.length > 0) {
-    console.log(`  ${pc3.bold("Env vars REMOVED:")}`);
+    console.log(`  ${pc4.bold("Env vars REMOVED:")}`);
     for (const c of conflicts) {
-      console.log(`    ${pc3.dim(c.name)}=${pc3.dim(c.value)}`);
+      console.log(`    ${pc4.dim(c.name)}=${pc4.dim(c.value)}`);
     }
     console.log("");
   }
-  console.log(pc3.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+  console.log(pc4.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
   console.log("");
 }
 function detectShellProfile() {
@@ -2682,14 +2984,14 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
   const isWindows3 = process.platform === "win32";
   const isLinux = process.platform === "linux";
   if (simulate) {
-    p4.note(
+    p5.note(
       "Running in dry-run mode \u2014 no keys will be read from or written to your system.",
       "Simulating first-run onboarding"
     );
   }
   if (!simulate) {
     const keyDiag = (reason) => {
-      p4.log.warn(`Credential store unavailable \u2014 ${reason}`);
+      p5.log.warn(`Credential store unavailable \u2014 ${reason}`);
       if (trace) {
         try {
           appendFileSync2(
@@ -2704,18 +3006,18 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
     const storedKey = await readFromCredentialStore(keyDiag);
     if (storedKey) {
       const storeName = isMac ? "macOS Keychain" : isWindows3 ? "Windows Credential Manager" : "Secret Service";
-      p4.log.success(`Found key in ${storeName}`);
+      p5.log.success(`Found key in ${storeName}`);
       process.env["OPENCODE_API_KEY"] = storedKey;
       return storedKey;
     }
   }
-  p4.note("Get your free key at: https://opencode.ai/auth", "OpenCode API key");
-  const key = await p4.password({
+  p5.note("Get your free key at: https://opencode.ai/auth", "OpenCode API key");
+  const key = await p5.password({
     message: "Paste your OPENCODE_API_KEY:",
     validate: (val) => val.trim() ? void 0 : "Key cannot be empty"
   });
-  if (p4.isCancel(key)) {
-    p4.cancel("Cancelled.");
+  if (p5.isCancel(key)) {
+    p5.cancel("Cancelled.");
     return null;
   }
   const trimmedKey = key.trim();
@@ -2776,7 +3078,7 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
         hint: "Key stored securely in your desktop keyring; opencode-starter reads it automatically next time"
       });
     } else if (!simulate) {
-      p4.log.info("No keyring daemon detected \u2014 secure storage requires GNOME Keyring or KWallet running.");
+      p5.log.info("No keyring daemon detected \u2014 secure storage requires GNOME Keyring or KWallet running.");
     }
     opts.push(
       {
@@ -2792,13 +3094,13 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
     );
     return opts;
   })();
-  const saveChoice = await p4.select({
+  const saveChoice = await p5.select({
     message: "Where should we save the key?",
     options: saveOptions,
     initialValue: isMac ? "keychain" : isWindows3 ? "credential-manager" : secretServiceAvailable ? "secret-service" : "profile"
   });
-  if (p4.isCancel(saveChoice)) {
-    p4.cancel("Cancelled.");
+  if (p5.isCancel(saveChoice)) {
+    p5.cancel("Cancelled.");
     return null;
   }
   if (simulate) {
@@ -2811,12 +3113,12 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
       profile: `Would append OPENCODE_API_KEY export to ${display}`,
       session: "Would use key for this session only"
     };
-    p4.log.info(`[dry-run] ${dryRunMessages[saveChoice]}`);
+    p5.log.info(`[dry-run] ${dryRunMessages[saveChoice]}`);
   } else if (saveChoice === "keychain") {
     if (await saveToCredentialStore(trimmedKey)) {
-      p4.log.success("Key saved to macOS Keychain \u2014 active now and automatically loaded next time.");
+      p5.log.success("Key saved to macOS Keychain \u2014 active now and automatically loaded next time.");
     } else {
-      p4.log.warn("Could not write to Keychain \u2014 key will be used for this session only");
+      p5.log.warn("Could not write to Keychain \u2014 key will be used for this session only");
     }
   } else if (saveChoice === "keychain-autoload") {
     if (await saveToCredentialStore(trimmedKey)) {
@@ -2829,33 +3131,33 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
 ${autoLoadLine}
 `);
         }
-        p4.log.success(`Key saved to Keychain and auto-load added to ${display} \u2014 active now and in all future terminals.`);
+        p5.log.success(`Key saved to Keychain and auto-load added to ${display} \u2014 active now and in all future terminals.`);
       } catch {
-        p4.log.success("Key saved to Keychain \u2014 active now and automatically loaded next time.");
-        p4.log.warn(`Could not write auto-load line to ${display}`);
+        p5.log.success("Key saved to Keychain \u2014 active now and automatically loaded next time.");
+        p5.log.warn(`Could not write auto-load line to ${display}`);
       }
     } else {
-      p4.log.warn("Could not write to Keychain \u2014 key will be used for this session only");
+      p5.log.warn("Could not write to Keychain \u2014 key will be used for this session only");
     }
   } else if (saveChoice === "credential-manager") {
     if (await saveToCredentialStore(trimmedKey)) {
-      p4.log.success("Key saved to Windows Credential Manager \u2014 active now and automatically loaded next time.");
+      p5.log.success("Key saved to Windows Credential Manager \u2014 active now and automatically loaded next time.");
     } else {
-      p4.log.warn("Could not write to Credential Manager \u2014 key will be used for this session only");
+      p5.log.warn("Could not write to Credential Manager \u2014 key will be used for this session only");
     }
   } else if (saveChoice === "setx") {
     try {
       const result = spawnSync("setx", ["OPENCODE_API_KEY", trimmedKey], { stdio: ["pipe", "pipe", "pipe"] });
       if (result.status !== 0) throw new Error("setx exited with non-zero status");
-      p4.log.success("Key saved as a user environment variable \u2014 active now and in all future terminals.");
+      p5.log.success("Key saved as a user environment variable \u2014 active now and in all future terminals.");
     } catch {
-      p4.log.warn("Could not run setx \u2014 key will be used for this session only");
+      p5.log.warn("Could not run setx \u2014 key will be used for this session only");
     }
   } else if (saveChoice === "secret-service") {
     if (await saveToCredentialStore(trimmedKey)) {
-      p4.log.success("Key saved to Secret Service \u2014 active now and automatically loaded next time.");
+      p5.log.success("Key saved to Secret Service \u2014 active now and automatically loaded next time.");
     } else {
-      p4.log.warn("Could not write to Secret Service \u2014 key will be used for this session only");
+      p5.log.warn("Could not write to Secret Service \u2014 key will be used for this session only");
     }
   } else if (saveChoice === "profile") {
     try {
@@ -2864,25 +3166,25 @@ ${autoLoadLine}
       appendFileSync2(path, `
 export OPENCODE_API_KEY='${escapedKey}'
 `);
-      p4.log.success(`Key saved to ${display} \u2014 active now and in all future terminals.`);
+      p5.log.success(`Key saved to ${display} \u2014 active now and in all future terminals.`);
     } catch {
-      p4.log.warn(`Could not write to ${display} \u2014 key will be used for this session only`);
+      p5.log.warn(`Could not write to ${display} \u2014 key will be used for this session only`);
     }
   }
   if (!simulate) process.env["OPENCODE_API_KEY"] = trimmedKey;
   return trimmedKey;
 }
 async function runModelsCommand() {
-  p4.intro(pc3.bold("  OpenCode Starter \u2014 Favorite Models"));
-  const spinner3 = p4.spinner();
+  p5.intro(pc4.bold("  OpenCode Starter \u2014 Favorite Models"));
+  const spinner3 = p5.spinner();
   spinner3.start("Loading providers...");
   const catalog = await fetchProviderCatalog();
   spinner3.stop("");
   const allProviders = providersForPicker(catalog);
   if (allProviders.length === 0) {
-    p4.log.warn("No providers found.");
-    p4.log.info("OpenCode Zen/Go is always available. Local providers appear when OpenCode is running.");
-    p4.outro("Done.");
+    p5.log.warn("No providers found.");
+    p5.log.info("OpenCode Zen/Go is always available. Local providers appear when OpenCode is running.");
+    p5.outro("Done.");
     return 0;
   }
   const modelLookup = /* @__PURE__ */ new Map();
@@ -2899,26 +3201,26 @@ async function runModelsCommand() {
     for (let i = 0; i < favorites.length; i++) {
       const fav = favorites[i];
       const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
-      const label = entry ? `\u2605 ${entry.modelName} (${entry.providerName})` : pc3.dim(`\u2605 ${fav.modelId} \u2014 provider gone`);
+      const label = entry ? `\u2605 ${entry.modelName} (${entry.providerName})` : pc4.dim(`\u2605 ${fav.modelId} \u2014 provider gone`);
       options.push({ value: `fav-${i}`, label, hint: "select to remove" });
     }
     const atCap = favorites.length >= MAX_MODEL_CATALOG;
     options.push({
       value: "__add__",
-      label: atCap ? pc3.dim(`+ Add a model \u2192 (limit of ${MAX_MODEL_CATALOG} reached)`) : "+ Add a model \u2192",
+      label: atCap ? pc4.dim(`+ Add a model \u2192 (limit of ${MAX_MODEL_CATALOG} reached)`) : "+ Add a model \u2192",
       hint: atCap ? "Remove a favorite first to make room" : `${allProviders.length} provider${allProviders.length !== 1 ? "s" : ""} available`
     });
     options.push({ value: "__done__", label: "Done", hint: "" });
     const header = favorites.length === 0 ? `Favorites (0/${MAX_MODEL_CATALOG})` : `Favorites (${favorites.length}/${MAX_MODEL_CATALOG}) \u2014 select to remove`;
-    const choice = await p4.select({
+    const choice = await p5.select({
       message: header,
       options,
       initialValue: "__done__"
     });
-    if (p4.isCancel(choice) || choice === "__done__") break;
+    if (p5.isCancel(choice) || choice === "__done__") break;
     if (choice === "__add__") {
       if (atCap) {
-        p4.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+        p5.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
         continue;
       }
       const providerOptions = allProviders.map((ap) => ({
@@ -2926,11 +3228,11 @@ async function runModelsCommand() {
         label: ap.name,
         hint: `${ap.models.length} model${ap.models.length !== 1 ? "s" : ""}`
       }));
-      const pickedProviderId = await p4.select({
+      const pickedProviderId = await p5.select({
         message: "Which provider?",
         options: providerOptions
       });
-      if (p4.isCancel(pickedProviderId)) continue;
+      if (p5.isCancel(pickedProviderId)) continue;
       const provider = allProviders.find((ap) => ap.id === pickedProviderId);
       const browsed = await browseAllModels(provider, prefs);
       if (!browsed) continue;
@@ -2938,15 +3240,15 @@ async function runModelsCommand() {
       const result = addFavorite(favorites, fav);
       if (!result.ok) {
         if (result.reason === "duplicate") {
-          p4.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
+          p5.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
         } else {
-          p4.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+          p5.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
         }
         continue;
       }
       favorites = result.list;
       favoritesDirty = true;
-      p4.log.success(`Added ${browsed.name || browsed.id} (${provider.name}) to favorites.`);
+      p5.log.success(`Added ${browsed.name || browsed.id} (${provider.name}) to favorites.`);
     } else if (choice.startsWith("fav-")) {
       const idx = parseInt(choice.slice(4), 10);
       const fav = favorites[idx];
@@ -2954,14 +3256,14 @@ async function runModelsCommand() {
       const label = entry ? `${entry.modelName} (${entry.providerName})` : fav.modelId;
       favorites = removeFavorite(favorites, fav);
       favoritesDirty = true;
-      p4.log.success(`Removed ${label} from favorites.`);
+      p5.log.success(`Removed ${label} from favorites.`);
     }
   }
   if (favoritesDirty) {
     savePreferences({ favoriteModels: favorites });
   }
-  p4.outro(
-    favorites.length === 0 ? "No favorites saved \u2014 launch will use single-model mode." : pc3.green(`${favorites.length} favorite${favorites.length !== 1 ? "s" : ""} saved \u2014 /model menu will show these on next launch.`)
+  p5.outro(
+    favorites.length === 0 ? "No favorites saved \u2014 launch will use single-model mode." : pc4.green(`${favorites.length} favorite${favorites.length !== 1 ? "s" : ""} saved \u2014 /model menu will show these on next launch.`)
   );
   return 0;
 }
@@ -2969,7 +3271,7 @@ async function runClaudeCommand(parsed) {
   const { dryRun, setup, trace, claudeArgs } = parsed;
   const claudePath = findClaudeBinary();
   if (!claudePath) {
-    console.error(pc3.red("\nError: claude binary not found on PATH.\n"));
+    console.error(pc4.red("\nError: claude binary not found on PATH.\n"));
     console.error("Install Claude Code:");
     console.error("  npm install -g @anthropic-ai/claude-code\n");
     return 1;
@@ -2979,7 +3281,7 @@ async function runClaudeCommand(parsed) {
   const favorites = dryRun ? [] : prefs.favoriteModels ?? [];
   const switchMenuActive = favorites.length > 0;
   const hasZenGoFavorites = favorites.some((f) => f.providerId === "zen" || f.providerId === "go");
-  p4.intro(pc3.bold("  OpenCode Starter"));
+  p5.intro(pc4.bold("  OpenCode Starter"));
   let earlyEffectiveKey = null;
   let earlyZenModels = [];
   let earlyGoModels = [];
@@ -2987,7 +3289,7 @@ async function runClaudeCommand(parsed) {
     const apiKey2 = await resolveOrCollectApiKey(false, trace);
     if (!apiKey2) return 0;
     earlyEffectiveKey = apiKey2;
-    const zenGoSpinner = p4.spinner();
+    const zenGoSpinner = p5.spinner();
     zenGoSpinner.start("Fetching OpenCode models for switch menu...");
     try {
       const backends = [];
@@ -3000,15 +3302,15 @@ async function runClaudeCommand(parsed) {
     } catch (err) {
       zenGoSpinner.stop("");
       const detail = err instanceof Error ? err.message : String(err);
-      p4.log.warn(`Could not fetch OpenCode models (${detail}) \u2014 Zen/Go favorites will be skipped from /model catalog`);
+      p5.log.warn(`Could not fetch OpenCode models (${detail}) \u2014 Zen/Go favorites will be skipped from /model catalog`);
     }
   }
-  const providerSpinner = p4.spinner();
+  const providerSpinner = p5.spinner();
   providerSpinner.start("Checking for local providers...");
   const localProviders = await fetchLocalProviders();
   providerSpinner.stop("");
   if (localProviders === null) {
-    p4.log.info(pc3.dim("Tip: Install OpenCode locally to unlock additional providers"));
+    p5.log.info(pc4.dim("Tip: Install OpenCode locally to unlock additional providers"));
   }
   let providerChoice = "opencode";
   if (localProviders !== null && localProviders.length > 0) {
@@ -3021,13 +3323,13 @@ async function runClaudeCommand(parsed) {
       }))
     ];
     const initialProvider = prefs.lastProvider && providerOptions.some((o) => o.value === prefs.lastProvider) ? prefs.lastProvider : "opencode";
-    const chosen = await p4.select({
+    const chosen = await p5.select({
       message: "Which provider?",
       options: providerOptions,
       initialValue: initialProvider
     });
-    if (p4.isCancel(chosen)) {
-      p4.cancel("Cancelled.");
+    if (p5.isCancel(chosen)) {
+      p5.cancel("Cancelled.");
       return 0;
     }
     providerChoice = chosen;
@@ -3054,22 +3356,22 @@ async function runClaudeCommand(parsed) {
       );
       const startingRoute = localModelToRoute(provider, selectedModel) ?? resolveRoute(provider.id, selectedModel.id);
       if (!startingRoute) {
-        p4.log.error("Could not resolve a proxy route for the selected model.");
+        p5.log.error("Could not resolve a proxy route for the selected model.");
         return 1;
       }
       const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
       if (dryRun) {
         const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? "(unknown)";
         console.log("");
-        console.log(pc3.bold(pc3.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
+        console.log(pc4.bold(pc4.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
         console.log("");
-        console.log(`  ${pc3.bold("Provider:")}      ${provider.name}`);
-        console.log(`  ${pc3.bold("Starting model:")} ${selectedModel.id}`);
-        console.log(`  ${pc3.bold("Endpoint:")}      ${endpoint}`);
-        console.log(`  ${pc3.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
-        catalogRoutes.forEach((r) => console.log(`    ${pc3.dim(r.displayName)}`));
+        console.log(`  ${pc4.bold("Provider:")}      ${provider.name}`);
+        console.log(`  ${pc4.bold("Starting model:")} ${selectedModel.id}`);
+        console.log(`  ${pc4.bold("Endpoint:")}      ${endpoint}`);
+        console.log(`  ${pc4.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
+        catalogRoutes.forEach((r) => console.log(`    ${pc4.dim(r.displayName)}`));
         console.log("");
-        console.log(pc3.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+        console.log(pc4.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
         console.log("");
         return 0;
       }
@@ -3085,15 +3387,15 @@ async function runClaudeCommand(parsed) {
       const formatDesc = selectedModel.modelFormat === "anthropic" ? "direct passthrough" : "via SDK adapter proxy";
       const endpoint = selectedModel.modelFormat === "anthropic" ? selectedModel.baseUrl ?? "(unknown)" : selectedModel.npm ?? "SDK";
       console.log("");
-      console.log(pc3.bold(pc3.cyan("  DRY RUN \u2014 would execute:")));
+      console.log(pc4.bold(pc4.cyan("  DRY RUN \u2014 would execute:")));
       console.log("");
-      console.log(`  ${pc3.bold("Provider:")}  ${provider.name}`);
-      console.log(`  ${pc3.bold("Model:")}     ${selectedModel.id}`);
-      console.log(`  ${pc3.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
-      console.log(`  ${pc3.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
-      console.log(`  ${pc3.bold("Key:")}       ${provider.id} provider key`);
+      console.log(`  ${pc4.bold("Provider:")}  ${provider.name}`);
+      console.log(`  ${pc4.bold("Model:")}     ${selectedModel.id}`);
+      console.log(`  ${pc4.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
+      console.log(`  ${pc4.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
+      console.log(`  ${pc4.bold("Key:")}       ${provider.id} provider key`);
       console.log("");
-      console.log(pc3.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+      console.log(pc4.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
       console.log("");
       return 0;
     }
@@ -3120,11 +3422,11 @@ async function runClaudeCommand(parsed) {
             upstreamModelId: selectedModel.upstreamModelId
           }
         );
-        p4.log.info(
-          `SDK adapter proxy started on port ${proxyHandle2.port}` + (selectedModel.npm ? pc3.dim(` (${selectedModel.npm})`) : "")
+        p5.log.info(
+          `SDK adapter proxy started on port ${proxyHandle2.port}` + (selectedModel.npm ? pc4.dim(` (${selectedModel.npm})`) : "")
         );
       } catch (err) {
-        p4.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
+        p5.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
         return 1;
       }
       childEnv2 = buildChildEnv(
@@ -3140,7 +3442,7 @@ async function runClaudeCommand(parsed) {
     }
     const debugLogPath2 = join5(tmpdir(), "opencode-starter-debug.log");
     const traceArgs2 = trace ? ["--debug-file", debugLogPath2] : [];
-    if (trace) p4.log.info(`Debug log: ${debugLogPath2}`);
+    if (trace) p5.log.info(`Debug log: ${debugLogPath2}`);
     const exitCode2 = await launchClaude(childEnv2, selectedModel.id, [...traceArgs2, ...claudeArgs]);
     proxyHandle2?.close();
     if (trace) printTraceLog(debugLogPath2);
@@ -3157,7 +3459,7 @@ async function runClaudeCommand(parsed) {
   }
   const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
   const needsGo = tier === "go" || tier === "both";
-  const spinner3 = p4.spinner();
+  const spinner3 = p5.spinner();
   spinner3.start("Fetching available models...");
   let zenModels = earlyZenModels;
   let goModels = earlyGoModels;
@@ -3174,8 +3476,8 @@ async function runClaudeCommand(parsed) {
     }
     spinner3.stop(`Loaded ${zenModels.length + goModels.length} models`);
   } catch (err) {
-    spinner3.stop(pc3.red("Failed to load models"));
-    console.error(pc3.red(String(err instanceof Error ? err.message : err)));
+    spinner3.stop(pc4.red("Failed to load models"));
+    console.error(pc4.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
   const selection = await runWizard(prefs, { zen: zenModels, go: goModels }, conflicts, tier);
@@ -3185,7 +3487,7 @@ async function runClaudeCommand(parsed) {
     const resolveRoute = makeRouteResolver(localProviders, earlyZenModels, earlyGoModels, effectiveKey);
     const startingRoute = zenGoModelToRoute(selection.model, effectiveKey);
     if (!startingRoute) {
-      p4.log.error("Could not resolve a proxy route for the selected model.");
+      p5.log.error("Could not resolve a proxy route for the selected model.");
       return 1;
     }
     const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
@@ -3221,11 +3523,11 @@ async function runClaudeCommand(parsed) {
         selection.model.contextWindow,
         { npm: "@ai-sdk/openai-compatible", baseURL: `${selection.backend.baseUrl}/v1` }
       );
-      p4.log.info(
-        `Translation proxy started on port ${proxyHandle.port} ` + pc3.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
+      p5.log.info(
+        `Translation proxy started on port ${proxyHandle.port} ` + pc4.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
       );
     } catch (err) {
-      p4.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
+      p5.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }
@@ -3242,7 +3544,7 @@ async function runClaudeCommand(parsed) {
   const debugLogPath = join5(tmpdir(), "opencode-starter-debug.log");
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
   if (trace) {
-    p4.log.info(`Debug log: ${debugLogPath}`);
+    p5.log.info(`Debug log: ${debugLogPath}`);
   }
   const exitCode = await launchClaude(childEnv, selection.model.id, [...traceArgs, ...claudeArgs]);
   if (proxyHandle) {
@@ -3254,7 +3556,7 @@ async function runClaudeCommand(parsed) {
 async function main(args = process.argv.slice(2)) {
   const parsed = parseArgs(args);
   if (parsed.error) {
-    console.error(pc3.red(`
+    console.error(pc4.red(`
 Error: ${parsed.error}
 `));
     printHelp(rootHelpText());
@@ -3277,7 +3579,11 @@ Error: ${parsed.error}
       printHelp(serverHelpText());
       return 0;
     }
-    return runServerCommand();
+    return runServerCommand({
+      select: parsed.serverSelect,
+      favorites: parsed.serverFavorites,
+      maskVendors: parsed.serverMaskVendors
+    });
   }
   if (parsed.command === "models") {
     if (parsed.showVersion) {
@@ -3315,7 +3621,7 @@ if (isCliEntryPoint()) {
     if (err === /* @__PURE__ */ Symbol.for("clack:cancel")) {
       process.exit(0);
     }
-    console.error(pc3.red("\nUnexpected error:"), err);
+    console.error(pc4.red("\nUnexpected error:"), err);
     process.exit(1);
   });
 }

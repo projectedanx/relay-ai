@@ -65,6 +65,8 @@ export interface UserPreferences {
   subscriptionTier?: 'free' | 'zen' | 'go' | 'both';
   server?: {
     savedPassword?: string;
+    /** Provider ids exposed by `opencode-starter server` (zen, go, or local OpenCode provider ids). */
+    exposedProviders?: string[];
   };
   modelListCache?: {
     zen?: { models: ModelInfo[]; fetchedAt: string };
@@ -80,6 +82,12 @@ export interface ParsedArgs {
   setup: boolean;
   trace: boolean;
   claudeArgs: string[];
+  /** `opencode-starter server --select` — pick which providers to expose. */
+  serverSelect?: boolean;
+  /** `opencode-starter server --favorites` — expose only models from `opencode-starter models`. */
+  serverFavorites?: boolean;
+  /** `opencode-starter server --mask-vendors` — sanitize gateway ids for Desktop discovery. */
+  serverMaskVendors?: boolean;
   error?: string;
 }
 

@@ -116,3 +116,17 @@ export function clearSavedServerPassword(): void {
   if (Object.keys(config.server).length === 0) delete config.server;
   writeConfig(config);
 }
+
+export function getServerExposedProviders(): string[] | null {
+  const list = readConfig().server?.exposedProviders;
+  return list && list.length > 0 ? list : null;
+}
+
+export function setServerExposedProviders(providerIds: string[]): void {
+  const config = readConfig();
+  config.server = {
+    ...(config.server ?? {}),
+    exposedProviders: providerIds,
+  };
+  writeConfig(config);
+}

@@ -1,5 +1,11 @@
 // src/server/models.ts
 import { resolveContextWindow } from '../context-window.js';
+import { aliasModelId } from '../proxy.js';
+import { maskGatewayModelId } from './vendor-mask.js';
+
+export interface GatewayModelOptions {
+  maskVendors?: boolean;
+}
 
 export type ServerModelFormat = 'anthropic' | 'openai' | 'unsupported';
 export type ServerBackendId = 'zen' | 'go';
@@ -25,6 +31,10 @@ export interface ServerModelInfo {
   apiBaseUrl?: string;     // base URL for openai-compatible / openrouter SDK providers
   apiKey?: string;         // model-specific API key; overrides server-level apiKey if set; never returned in API responses
   contextWindow?: number;
+  /** Picker label for gateway aliases, e.g. "OpenCode Go" or local provider name. */
+  providerLabel?: string;
+  /** Provider id for filtering: `zen`, `go`, or a local OpenCode provider id. */
+  providerId?: string;
 }
 
 export interface ModelCatalog {
@@ -79,6 +89,60 @@ export function formatAnthropicModels(models: ServerModelInfo[]) {
   return formatAnthropicModelList(
     models.map(model => ({ id: model.id, name: model.name, contextWindow: model.contextWindow })),
   );
+}
+
+export function gatewayProviderLabel(model: ServerModelInfo): string {
+  return model.providerLabel ?? (model.sourceBackend === 'go' ? 'OpenCode Go' : 'OpenCode Zen');
+}
+
+/** Gateway-discovery-safe id — Claude clients only surface claude-* and anthropic-* ids. */
+export function gatewayAliasId(model: ServerModelInfo): string {
+  return aliasModelId(model.id, gatewayProviderLabel(model));
+}
+
+export function exposedGatewayAliasId(model: ServerModelInfo, opts?: GatewayModelOptions): string {
+  const alias = gatewayAliasId(model);
+  return opts?.maskVendors ? maskGatewayModelId(alias) : alias;
+}
+
+/** Readable picker label — ids may be masked for Desktop discovery, names stay real. */
+export function gatewayDisplayName(model: ServerModelInfo, opts?: GatewayModelOptions): string {
+  if (!opts?.maskVendors) return model.name;
+  return `${model.name} (${gatewayProviderLabel(model)})`;
+}
+
+export function formatGatewayAnthropicModels(models: ServerModelInfo[], opts?: GatewayModelOptions) {
+  return formatAnthropicModelList(
+    models.map(model => ({
+      id: exposedGatewayAliasId(model, opts),
+      name: gatewayDisplayName(model, opts),
+      contextWindow: model.contextWindow,
+    })),
+  );
+}
+
+/** Catalog with alias → model lookup for gateway clients (Claude Desktop, Claude Code). */
+export function createGatewayModelCatalog(models: ServerModelInfo[], opts?: GatewayModelOptions): ModelCatalog {
+  const byId = new Map<string, ServerModelInfo>();
+  for (const model of models) {
+    byId.set(model.id, model);
+    const alias = exposedGatewayAliasId(model, opts);
+    if (alias !== model.id) byId.set(alias, model);
+    if (opts?.maskVendors) {
+      const rawAlias = gatewayAliasId(model);
+      if (rawAlias !== alias) byId.set(rawAlias, model);
+    }
+  }
+
+  return {
+    get: (id: string) => byId.get(id),
+    list: () => [...models],
+  };
+}
+
+/** Model id to send upstream (OpenCode / provider API), not the gateway alias. */
+export function upstreamModelId(model: ServerModelInfo): string {
+  return model.upstreamModelId ?? model.id;
 }
 
 export function formatOpenAIModels(models: ServerModelInfo[]) {

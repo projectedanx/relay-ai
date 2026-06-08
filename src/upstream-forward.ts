@@ -1,12 +1,14 @@
 import { Readable } from 'node:stream';
 import type { ServerResponse } from 'node:http';
+import { sanitizeCredential } from './server/auth.js';
 
 export function anthropicUpstreamHeaders(apiKey: string, stream = false): Record<string, string> {
+  const key = sanitizeCredential(apiKey) ?? apiKey.trim();
   return {
     'Content-Type': 'application/json',
     'anthropic-version': '2023-06-01',
-    Authorization: `Bearer ${apiKey}`,
-    'x-api-key': apiKey,
+    Authorization: `Bearer ${key}`,
+    'x-api-key': key,
     ...(stream ? { Accept: 'text/event-stream' } : {}),
   };
 }

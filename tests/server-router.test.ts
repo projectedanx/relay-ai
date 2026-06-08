@@ -1,6 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createModelCatalog, type ServerModelInfo } from '../src/server/models.js';
+import { createGatewayModelCatalog, type ServerModelInfo } from '../src/server/models.js';
 import { startServer, type ServerHandle } from '../src/server/router.js';
 
 interface UpstreamRequest {
@@ -44,7 +44,7 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
   };
 }
 
-const catalog = createModelCatalog([
+const catalog = createGatewayModelCatalog([
   model('claude-native', 'anthropic', 'zen'),
   model('openai-format', 'openai', 'go'),
   model('bad-format', 'unsupported', 'zen'),
@@ -122,7 +122,10 @@ describe('server router', () => {
     const anthropic = await fetch(`${server.url}/anthropic/v1/models`);
     expect(anthropic.status).toBe(200);
     expect(await anthropic.json()).toMatchObject({
-      data: expect.arrayContaining([expect.objectContaining({ id: 'claude-native' })]),
+      data: expect.arrayContaining([
+        expect.objectContaining({ id: 'claude-native' }),
+        expect.objectContaining({ id: 'anthropic-opencode-go__openai-format' }),
+      ]),
     });
 
     const openai = await fetch(`${server.url}/openai/v1/models`);

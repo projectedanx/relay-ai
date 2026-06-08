@@ -1,11 +1,13 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { isAuthorized } from './auth.js';
 import {
-  formatAnthropicModels,
+  formatGatewayAnthropicModels,
   formatOpenAIModels,
+  type GatewayModelOptions,
   type ModelCatalog,
   type ServerBackendId,
   type ServerModelInfo,
+  upstreamModelId,
 } from './models.js';
 import { postJsonUpstream } from '../upstream-forward.js';
 import { createLanguageModel, isSdkMigratedNpm } from '../provider-factory.js';
@@ -28,6 +30,7 @@ export interface ServerOptions {
   serverPassword: string | null;
   catalog: ModelCatalog;
   backends: Record<ServerBackendId, ServerBackend>;
+  gateway?: GatewayModelOptions;
 }
 
 export interface ServerHandle {
@@ -91,7 +94,7 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     }
 
     if (req.method === 'GET' && pathname === '/anthropic/v1/models') {
-      sendJson(res, 200, formatAnthropicModels(options.catalog.list()));
+      sendJson(res, 200, formatGatewayAnthropicModels(options.catalog.list(), options.gateway));
       return;
     }
 
@@ -135,7 +138,7 @@ async function handleAnthropicMessages(
       ? `${model.baseUrl}/v1/messages`
       : `${backendFor(options, model).baseUrl}/v1/messages`;
     const apiKey = model.apiKey ?? options.apiKey;
-    await forwardJson(res, messagesUrl, body, apiKey);
+    await forwardJson(res, messagesUrl, { ...body, model: upstreamModelId(model) }, apiKey);
     return;
   }
 
@@ -147,7 +150,7 @@ async function handleAnthropicMessages(
     const apiKey = model.apiKey ?? options.apiKey;
     const languageModel = await createLanguageModel({
       npm: model.npm!,
-      modelId: model.upstreamModelId ?? model.id,
+      modelId: upstreamModelId(model),
       apiKey,
       baseURL: model.apiBaseUrl,
       providerId: model.sourceBackend,
@@ -162,10 +165,12 @@ async function handleAnthropicMessages(
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
         });
-        await streamAnthropicResponse(languageModel, params, model.id, chunk => res.write(chunk));
+        const clientModel = typeof body.model === 'string' ? body.model : model.id;
+        await streamAnthropicResponse(languageModel, params, clientModel, chunk => res.write(chunk));
         res.end();
       } else {
-        const anthropicResponse = await generateAnthropicResponse(languageModel, params, model.id);
+        const clientModel = typeof body.model === 'string' ? body.model : model.id;
+        const anthropicResponse = await generateAnthropicResponse(languageModel, params, clientModel);
         sendJson(res, 200, anthropicResponse);
       }
     } catch (err) {
@@ -249,13 +254,18 @@ function toRequest(req: IncomingMessage): Request {
   const headers = new Headers();
   for (const [name, value] of Object.entries(req.headers)) {
     if (Array.isArray(value)) {
-      for (const item of value) headers.append(name, item);
+      for (const item of value) headers.append(name, sanitizeIncomingHeaderValue(item));
     } else if (value !== undefined) {
-      headers.set(name, value);
+      headers.set(name, sanitizeIncomingHeaderValue(value));
     }
   }
 
   return new Request('http://localhost/', { headers });
+}
+
+/** HTTP headers cannot contain CR/LF — common when a multi-line secret is pasted into a client. */
+function sanitizeIncomingHeaderValue(value: string): string {
+  return value.replace(/\r?\n/g, ' ').trim();
 }
 
 function sendJson(res: ServerResponse, status: number, body: any): void {

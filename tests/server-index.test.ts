@@ -30,11 +30,14 @@ vi.mock('../src/env.js', () => ({
 vi.mock('../src/config.js', () => ({
   getCachedModels: () => state.cachedModels,
   getSavedServerPassword: () => state.savedPassword,
+  getServerExposedProviders: () => null,
   getSubscriptionTier: () => state.tier,
+  loadPreferences: () => ({ favoriteModels: [] }),
   setCachedModels: vi.fn(),
   setSavedServerPassword: (password: string) => {
     state.savedPassword = password;
   },
+  setServerExposedProviders: vi.fn(),
 }));
 
 vi.mock('../src/models.js', () => ({
