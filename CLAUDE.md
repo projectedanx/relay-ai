@@ -72,18 +72,15 @@ cli.ts
   - `@ai-sdk/anthropic` or `claude-*` → `'anthropic'` (direct passthrough)
   - `@ai-sdk/openai` or `gpt-*` → `'unsupported'` in the **cloud OpenCode wizard** (OpenCode Zen/Go proxy layer; not direct OpenAI). Use the **local OpenAI provider** instead for GPT models.
   - `@ai-sdk/google` or `gemini-*` → `'unsupported'` (needs model-specific endpoints)
-  - Everything else → `'openai'` (routed through local translation proxy)
+  - Everything else → `'openai'` (routed through the SDK adapter via the local proxy)
 - `sourceBackend`: set from the backend that was queried — critical for `go` tier which shows Zen free models + Go paid models in one list, so the correct `ANTHROPIC_BASE_URL` can be set per selected model
 
-**Translation proxy** (`src/proxy.ts` + `src/proxy-gemini.ts`): A local HTTP proxy on `127.0.0.1:<random-port>` accepts Anthropic-format requests at `/v1/messages` and forwards them upstream. Two translation paths:
+**Translation layer — the Vercel AI SDK adapter** (`src/sdk-adapter.ts` + `src/provider-factory.ts`): All non-Anthropic providers route through the Vercel AI SDK (`ai` + `@ai-sdk/*`, the same packages OpenCode loads), which owns wire format, endpoint selection, and provider quirks. This is the **single** translation path — there is no hand-rolled per-provider translation.
 
-- **OpenAI-compatible path** (Groq, Mistral, xAI, Ollama, Zen/Go): translates Anthropic → OpenAI chat completions format, translates response back. Handles streaming SSE, tool calls, thinking/reasoning blocks, images.
-- **OpenAI Responses API path** (`src/proxy-responses.ts`): when upstream is `api.openai.com` and `modelPrefersResponsesApi(modelId)` is true, routes to `/v1/responses` instead of `/v1/chat/completions`. Required for GPT-5.4+, GPT-5.5, Codex (`*-codex`), and o-series. Detected by prefix list + any `gpt-*-codex` ID. Logs `openai-responses:` in `--trace` mode.
-- **Gemini native path** (`src/proxy-gemini.ts`): detected by `isGeminiUrl()` when `upstreamUrl` contains `generativelanguage.googleapis.com`. Routes to `v1beta/models/{model}:generateContent` (non-streaming) or `:streamGenerateContent?alt=sse` (streaming). Sends `x-goog-api-key` header instead of `Authorization: Bearer`. Enables full thinking mode (`thinkingConfig: { includeThoughts: true }`) and correctly handles `thought_signature` on tool calls.
+- **`provider-factory.ts`** — `createLanguageModel({ npm, modelId, apiKey, baseURL })` maps an OpenCode `api.npm` package (`@ai-sdk/openai|google|groq|mistral|xai|openai-compatible`, `@openrouter/ai-sdk-provider`) to an SDK `LanguageModel`. `isSdkMigratedNpm(npm)` gates the SDK path. `modelPrefersResponsesApi(modelId)` selects `provider.responses(id)` over `provider.chat(id)` for OpenAI/xAI models that require the Responses API (GPT-5.4+, GPT-5.5, `*-codex`, o-series, xAI `*-multi-agent`).
+- **`sdk-adapter.ts`** — Anthropic `/v1/messages` ↔ SDK, one turn per request (Claude Code owns the tool loop). `translateRequest(body, npm)` builds the SDK call params (messages, tools, tool_choice, system) and folds inline `role:'system'` messages — Claude Code injects the skills list / system-reminders this way — into the system prompt so they aren't dropped. `streamAnthropicResponse` maps the SDK `fullStream` to Anthropic SSE; `generateAnthropicResponse` handles non-streaming. `thought_signature` round-trips: encoded into the Anthropic `tool_use.id` as `{id}::ts::{signature}` and decoded back into `providerOptions.google.thoughtSignature` (Gemini puts the signature on the tool-call parts, captured at `tool-input-start`). The SDK handles Gemini's strict `thought_signature` echo-back correctly — the reason a hand-rolled Gemini-native path used to be required.
 
-The Gemini native path is required because the OpenAI-compatible Gemini endpoint strips `thought_signature` from tool call responses (to maintain OpenAI format compatibility) while still requiring it on echo-back — an unresolvable loop. The native API returns `thought_signature` correctly.
-
-`/v1/models` synthetic response includes `context_window` per model via `contextWindowForModel()` so Claude Code's status bar shows accurate remaining context (Gemini Flash/most: 1M, Gemini 2.5 Pro / 1.5 Pro: 2M, Claude: 200k, GPT-4: 128k). Zero external dependencies — uses Node.js built-in `http` + `fetch`. Adapted from [cucoleadan/opencode-cowork-proxy](https://github.com/cucoleadan/opencode-cowork-proxy) (MIT).
+**Local proxy** (`src/proxy.ts`): a local HTTP server on `127.0.0.1:<random-port>` that accepts Anthropic-format requests at `/v1/messages` and dispatches per route (`startProxyCatalog`/`startProxy`): `modelFormat === 'anthropic'` → direct passthrough to the provider's Anthropic endpoint; otherwise → `isSdkMigratedNpm(route.npm)` → the SDK adapter. Each `ProxyRoute` carries `npm` + `baseURL`. `GET /v1/models` returns a synthetic catalog including `context_window` per model (via `formatAnthropicModelEntry` / `resolveContextWindow`) so Claude Code's status bar shows accurate remaining context. `aliasModelId()` rewrites non-`claude-*` ids to `anthropic-{provider}__{id}` so gateway model discovery accepts them.
 
 **Subscription tiers** control which models are shown and whether a backend selector appears:
 - `free` / `zen`: always Zen backend, no backend selector
@@ -109,29 +106,15 @@ Save options per platform:
 
 In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is active for the current session regardless of save choice.
 
-**Local provider discovery** (`src/providers.ts`): `fetchLocalProviders()` spawns `opencode serve --port 0`, waits for the listening URL in stdout/stderr (10s timeout, spinner shown in CLI), fetches `GET /config/providers`, then kills the process. `normalizeProviders()` (called internally) skips OAuth providers (empty key), skips `opencode`/`opencode-go` (cloud backends handled separately), and classifies each model's format and upstream URL from its `api.npm` package. Known first-party packages (`@ai-sdk/anthropic|openai|google|groq|mistral|xai`) have hardcoded URLs; `@ai-sdk/openai-compatible` providers use the `api.url` from the config. Models with unknown packages are dropped. Google/Gemini `completionsUrl` is set to `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` — but the proxy detects the Gemini domain and uses the **native** API path instead (see proxy section). Cost display in Claude Code is inaccurate for non-Anthropic models (Claude Code applies its own pricing table); documented limitation.
+**Local provider discovery** (`src/providers.ts`): `fetchLocalProviders()` spawns `opencode serve --port 0`, waits for the listening URL in stdout/stderr (10s timeout, spinner shown in CLI), fetches `GET /config/providers`, then kills the process. `normalizeProviders()` (called internally) skips OAuth providers (empty key), skips `opencode`/`opencode-go` (cloud backends handled separately), and classifies each model's format and upstream URL from its `api.npm` package. Each model captures its `api.npm` package and `api.url`, which `provider-factory.createLanguageModel` uses to build the SDK provider (first-party packages resolve their own endpoints; `@ai-sdk/openai-compatible` / `@openrouter/ai-sdk-provider` use `api.url` as the base URL). Models with unknown packages are dropped. Gemini routes through `@ai-sdk/google`, which uses the native Generative AI API and handles `thought_signature` correctly. Cost display in Claude Code is inaccurate for non-Anthropic models (Claude Code applies its own pricing table); documented limitation.
 
 **Local provider routing:** Two paths depending on `model.modelFormat`:
 - `'anthropic'`: `buildChildEnv(model.baseUrl, model.id, provider.apiKey)` — no proxy, Claude Code talks directly to the provider's Anthropic-compatible endpoint. The `baseUrl` must NOT include `/v1` (the Anthropic SDK appends it).
-- `'openai'`: `startProxy(model.completionsUrl, model.id, trace)` — proxy started on a random local port; `buildChildEnv('http://127.0.0.1', model.id, provider.apiKey, proxyPort)`. The `completionsUrl` is the full endpoint including path (e.g. `https://api.groq.com/openai/v1/chat/completions`).
+- `'openai'`: `startProxy(model.completionsUrl, model.id, trace, contextWindow, { npm, baseURL })` — proxy started on a random local port; `buildChildEnv('http://127.0.0.1', model.id, provider.apiKey, proxyPort)`. The route's `npm` selects the SDK provider; `baseURL` (`api.url`) is used for openai-compatible / openrouter providers.
 
 **Providers that need a non-empty API key:** `normalizeProviders` skips any provider with an empty `key` field (to filter OAuth-only providers like OpenAI/xAI configured via browser login). Local providers that don't validate keys (e.g. Ollama) must still have a non-empty placeholder key set in OpenCode (e.g. `"ollama"`).
 
-**Server command local providers** (`src/server/index.ts`): After loading Zen/Go models, `loadServerModels()` also calls `fetchLocalProviders()` and appends each `LocalProviderModel` as a `ServerModelInfo` with `baseUrl`/`completionsUrl`/`apiKey` routing fields set. The router (`src/server/router.ts`) prefers these per-model fields when present. The `GET /models` endpoint strips `apiKey` from the serialized output to prevent key exposure. Spinner message shows `"N models (M from local providers)"`.
-
-**Proxy translation fixes (v0.3.0):**
-- `prompt_cache_key` removed from `translateRequest` output — it's a non-standard field rejected by Google, Groq, Mistral, and most providers.
-- `thought_signature` round-trip (OpenAI path): encoded into Anthropic `tool_use.id` as `{id}::ts::{signature}` so Claude Code preserves it. Decoded in `translateRequest` to re-inject on outgoing `tool_calls`. `tool_call_id` in tool results is also stripped of the suffix. Invisible to Claude Code.
-- `thought_signature` round-trip (Gemini native path, v0.3.1): the native API returns `thought_signature` directly on `functionCall` parts. `translateToGemini` echoes it back on `functionCall` when translating tool_use blocks. `translateFromGemini`/`translateStreamGemini` encode it into the Anthropic tool_use id using the same `::ts::` scheme.
-- Server `handleAnthropicMessages` now supports streaming for openai-format models (checks `body.stream`, pipes through `translateStream` when true).
-- Shell injection in API key save paths hardened: macOS profile uses POSIX single-quote escaping; Windows `setx` uses `spawnSync` with argument array.
-
-**`src/proxy-gemini.ts` key functions:**
-- `isGeminiUrl(url)` — returns true when url contains `generativelanguage.googleapis.com`
-- `geminiNativeUrl(model, stream)` — builds `v1beta/models/{model}:generateContent` or `:streamGenerateContent?alt=sse`
-- `translateToGemini(body)` — Anthropic request → Gemini native: `messages` → `contents[]` with `parts[]`, tools → `functionDeclarations`, system → `systemInstruction`, adds `thinkingConfig: { includeThoughts: true }`. Handles thinking blocks, tool_use (with thought_signature), tool_result (matched by function name via `buildToolNameMap`), images.
-- `translateFromGemini(response, model)` — Gemini native response → Anthropic: thought parts → thinking blocks, text parts → text blocks, functionCall parts → tool_use with thought_signature encoded in id.
-- `translateStreamGemini(stream, model)` — Gemini native SSE → Anthropic SSE. Tracks thinking/text/tool-call block state, emits proper content_block_start/delta/stop events.
+**Server command local providers** (`src/server/index.ts`): `loadServerModels()` loads Zen/Go models (`zenGoModelsToServerModels` — openai-format models get `npm='@ai-sdk/openai-compatible'` + `apiBaseUrl=${backend.baseUrl}/v1`; anthropic-format stay passthrough) and also calls `fetchLocalProviders()`, appending each `LocalProviderModel` as a `ServerModelInfo` carrying `npm`/`apiBaseUrl`/`baseUrl`/`completionsUrl`/`apiKey`. The router (`src/server/router.ts`) `handleAnthropicMessages`: anthropic-format → forward raw to `{baseUrl}/v1/messages`; openai-format → `isSdkMigratedNpm(npm)` guard → `createLanguageModel` + `streamAnthropicResponse`/`generateAnthropicResponse` (same SDK adapter as the CLI proxy). `GET /models` strips `apiKey` from output. Spinner shows `"N models (M from local providers)"`.
 
 **Stale free models:** `STALE_FREE_MODELS` in `constants.ts` contains models whose free promotion ended but the API still returns them. Currently only `qwen3.6-plus-free`. These are filtered out in `mergeModels()`.
 
@@ -141,9 +124,9 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 
 **Shared upstream forwarding** (`src/upstream-forward.ts`): `relayAnthropicMessages`, `postJsonUpstream`, anthropic header helpers — used by `proxy.ts` and `server/router.ts`.
 
-**Provider catalog helpers** (`src/provider-catalog.ts`): `fetchProviderCatalog`, `fetchZenGoModels`, `providersForPicker`, `localProvidersToServerModels` — shared between CLI and server.
+**Provider catalog helpers** (`src/provider-catalog.ts`): `fetchProviderCatalog`, `fetchZenGoModels`, `providersForPicker`, `localProvidersToServerModels`, `zenGoModelsToServerModels` — shared between CLI and server.
 
-**Tests** cover pure functions: `env.ts`, `models.ts`, `proxy.ts`, `proxy-gemini.ts`, `proxy-responses.ts`, `providers.ts`, `catalog.ts`, `favorites.ts`, `prompts.ts`, `upstream-forward.ts`, `config.ts`, `cli.ts` (help text), server modules. Interactive launch flow verified manually.
+**Tests** cover pure functions: `env.ts`, `models.ts`, `sdk-adapter.ts`, `provider-factory.ts`, `proxy.ts` (`aliasModelId`), `providers.ts`, `catalog.ts`, `favorites.ts`, `prompts.ts`, `upstream-forward.ts`, `config.ts`, `tool-search.ts`, `cli.ts` (help text), server modules. Real-provider end-to-end validation lives in `spike/` (gitignored). Interactive launch flow verified manually.
 
 ## Key constraints
 
@@ -151,20 +134,18 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `--dry-run` ignores all saved state (env key, Keychain, tier, preferences) and skips all writes. Used to simulate a fresh first-run experience.
 - When adding a new backend, update `BACKENDS` in `constants.ts`, the `BackendConfig` id union in `types.ts`, and the subscription tier logic in `prompts.ts` and `cli.ts`.
 - `buildChildEnv(baseUrl: string, model, apiKey, proxyPort?)` — takes a plain string URL, not a `BackendConfig`. When `proxyPort` is set, `ANTHROPIC_BASE_URL` is always `http://127.0.0.1:{proxyPort}` regardless of `baseUrl`.
-- `startProxy(completionsUrl, modelId, debug)` — single-model wrapper; takes full chat completions URL including path.
+- `startProxy(completionsUrl, modelId, debug, contextWindow?, sdk?)` — single-model wrapper around `startProxyCatalog`; `sdk` carries `{ npm, baseURL }` to select the SDK provider.
 - `startProxyCatalog(routes, startingAliasId, debug)` — multi-route catalog proxy for switch-menu sessions.
 - `MAX_MODEL_CATALOG = 10` in `constants.ts` — favorites cap and max routes in catalog.
 
-## Release status (v0.3.0 + unreleased favorites)
+## Release status (v0.3.0 — unreleased, prepping)
 
-**Shipped in v0.3.0:** Local providers, Gemini native API, OpenAI Responses API routing, Mistral message order, tool-search passthrough, recent models, context window in `/v1/models`, server local-provider catalog.
-
-**Unreleased (in working tree):** `opencode-starter models` favorites manager, `startProxyCatalog` switch menu, model search/browse UX, `catalog.ts` / `provider-catalog.ts` / `upstream-forward.ts` refactors.
+Last published/tagged version is **v0.2.5**. Everything since — local providers, Gemini/OpenAI-Responses/Mistral support via the SDK adapter, the `opencode-starter models` favorites manager, `startProxyCatalog` switch menu, model search/browse UX — ships together as **0.3.0** (not yet tagged or on npm). `package.json` is at `0.3.0`; CHANGELOG `[0.3.0]` holds the consolidated net-of-0.2.5 notes.
 
 **Pre-release checklist:**
 - Broader manual testing of local providers (Groq, Mistral, xAI, Anthropic-direct, Ollama).
 - Ollama note: must set a non-empty placeholder key in OpenCode config (Ollama ignores the auth header).
-- Bump version and move CHANGELOG `[Unreleased]` to tagged release when favorites land.
+- Tag `v0.3.0` and publish to npm once validated.
 
 **Known limitations (by design):**
 - Cost display in Claude Code is always inaccurate for non-Anthropic models.
@@ -174,5 +155,5 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - In switch-menu (gateway-discovery) mode the displayed context window reflects the **launch** model and does NOT update on live `/model` switch. Claude Code's gateway model discovery only carries `id` + `display_name` (no `context_window`) and fetches `/v1/models` once at startup, so `CLAUDE_CODE_MAX_CONTEXT_TOKENS` (fixed at launch) is the only lever. Single-model launches show the correct window.
 
 **Provider quirks (documented from testing):**
-- **Mistral free tier:** strict API rate limits (HTTP 429, code `1300`). Tool-heavy Claude Code sessions burn quota quickly (parallel title-generation requests, Skill injection, multi-turn tool loops). Message-order normalization (`src/mistral-messages.ts`) fixes code `3230` but does not help with throttling.
-- **OpenAI direct (`@ai-sdk/openai` local provider):** two upstream endpoints. Most models use `/v1/chat/completions`; newer models (GPT-5.4+, GPT-5.5, `*-codex`, o-series) require `/v1/responses` — auto-selected by `modelPrefersResponsesApi()` when upstream is `api.openai.com`. Sending Responses-only models to chat/completions returns 404 ("not a chat model" or "model not found"). Some Claude Code model IDs (e.g. `gpt-5.4-fast`) may not exist on the OpenAI API even when routed correctly — use IDs that appear in your OpenAI dashboard (e.g. `gpt-5.4` works). Cloud OpenCode Zen/Go GPT models remain hidden in the wizard (`unsupported`); use the local OpenAI provider for GPT access.
+- **Mistral free tier:** strict API rate limits (HTTP 429, code `1300`). Tool-heavy Claude Code sessions burn quota quickly (parallel title-generation requests, Skill injection, multi-turn tool loops). The SDK handles Mistral message ordering; throttling is unaffected.
+- **OpenAI direct (`@ai-sdk/openai` local provider):** newer models (GPT-5.4+, GPT-5.5, `*-codex`, o-series) require the Responses API — `provider-factory.modelPrefersResponsesApi()` selects `openai.responses(id)` for them, `openai.chat(id)` otherwise. Some Claude Code model IDs (e.g. `gpt-5.4-fast`) may not exist on the OpenAI API even when routed correctly — use IDs that appear in your OpenAI dashboard (e.g. `gpt-5.4` works). Cloud OpenCode Zen/Go GPT models remain hidden in the wizard (`unsupported`); use the local OpenAI provider for GPT access.

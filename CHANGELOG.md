@@ -2,44 +2,20 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-07
+
 ### Added
-- Route providers through the Vercel AI SDK (`ai` + `@ai-sdk/*`) via a single Anthropic↔SDK adapter (`src/sdk-adapter.ts`, `src/provider-factory.ts`). The SDK owns wire format, endpoint selection, and provider quirks (Gemini `thought_signature`, xAI multi-agent `/responses`, Mistral ordering). All local providers and cloud Zen/Go (openai-format) route through it; Anthropic-format models stay direct passthrough.
+- Local OpenCode provider discovery — launch Claude Code with any provider configured in OpenCode: Groq, Mistral, xAI, Google/Gemini, OpenAI, Anthropic-direct, Ollama, OpenRouter, and more. Includes full Gemini thinking + tool calls, OpenAI Responses-API models (GPT-5.4+, GPT-5.5, Codex, o-series), and Mistral.
+- `opencode-starter models` — interactive favorites manager (up to 10 models) for mid-session switching. With favorites set, Claude Code's `/model` switches live between your starting model and your favorites.
+- Model picker search and paginated browse for large catalogs; recent models per provider shown at the top of pickers.
+- Accurate `context_window` in synthetic `/v1/models` responses so Claude Code's status bar shows real remaining context.
+- `opencode-starter server` exposes local-provider models with per-model routing; `GET /models` never returns API keys.
 
 ### Changed
-- Removed the now-dead Gemini-native / OpenAI-Responses / OpenAI-compatible branches from the launch proxy request handler (every provider route goes through the SDK adapter). The hand-rolled translation modules remain only for the `server` command pending its migration.
+- All providers route through a single Vercel AI SDK adapter (`ai` + `@ai-sdk/*`), which owns wire format, endpoint selection, and provider quirks (Gemini `thought_signature`, xAI multi-agent `/responses`, Mistral message ordering). Both the `claude` launch proxy and the `server` command use it; Anthropic-format models remain direct passthrough.
 
 ### Docs
-- Document that Claude Code persists launched models to `~/.claude/settings.json` and may cache gateway catalogs — bare `claude` can show opencode-starter aliases after a session.
-
-### Added
-- `opencode-starter models` — interactive favorites manager (add/remove, max 10) for mid-session model switching.
-- Multi-route catalog proxy (`startProxyCatalog`) — when favorites exist, launch starts a proxy with your starting model plus favorites; Claude Code `/model` shows them via `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`.
-- Model picker search (lists >25 models) and paginated browse (15 per page with prev/next).
-- Recent models per provider (up to 3) shown at the top of local-provider pickers.
-- Shared modules: `src/catalog.ts`, `src/favorites.ts`, `src/provider-catalog.ts`, `src/upstream-forward.ts`.
-
-### Changed
-- Cloud and local-provider favorites can be mixed in the switch menu; routes resolve per provider (Zen, Go, or local).
-- Favorites manager saves once on Done instead of after every add/remove.
-- Server router and proxy share upstream forwarding helpers from `src/upstream-forward.ts`.
-
-## [0.3.0] - 2026-06-05
-
-### Added
-- Local OpenCode provider discovery — pick Groq, Mistral, xAI, Anthropic-direct, Ollama, Google/Gemini, OpenAI, and other configured providers at launch.
-- Gemini native API translation (`src/proxy-gemini.ts`) — full thinking mode and correct `thought_signature` round-trips on tool calls.
-- OpenAI Responses API routing (`src/proxy-responses.ts`) for GPT-5.4+, GPT-5.5, Codex, and o-series when using a local OpenAI provider.
-- Mistral message-order normalization (`src/mistral-messages.ts`) for tool-heavy sessions.
-- Tool-search beta passthrough for local proxy sessions.
-- Accurate `context_window` in synthetic `/v1/models` responses for Claude Code's status bar.
-- Server mode includes local-provider models with per-model routing; `GET /models` strips `apiKey` from output.
-
-### Fixed
-- `thought_signature` preserved through Anthropic ↔ OpenAI and Anthropic ↔ Gemini native round-trips.
-- `prompt_cache_key` removed from OpenAI translation output (rejected by Google, Groq, Mistral).
-- Gemini tool schema sanitization (allow-list, `required[]` filtering, exclusive min/max stripping).
-- Shell injection hardening in API key save paths (macOS profile quoting, Windows `setx` arg array).
-- Server streaming for openai-format models; empty `completionsUrl` guard; apiKey exposure on `/models`.
+- Note that Claude Code persists launched models to `~/.claude/settings.json` and may cache gateway catalogs — bare `claude` can show opencode-starter aliases after a session.
 
 ## [0.2.5] - 2026-06-05
 
