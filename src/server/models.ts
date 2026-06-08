@@ -19,6 +19,8 @@ export interface ServerModelInfo {
   };
   baseUrl?: string;        // anthropic-format: direct Anthropic-protocol URL (without /v1)
   completionsUrl?: string; // openai-format: full chat completions endpoint URL
+  npm?: string;            // OpenCode api.npm — openai-format models route through the SDK adapter
+  apiBaseUrl?: string;     // base URL for openai-compatible / openrouter SDK providers
   apiKey?: string;         // model-specific API key; overrides server-level apiKey if set; never returned in API responses
   contextWindow?: number;
 }

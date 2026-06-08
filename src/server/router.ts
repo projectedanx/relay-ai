@@ -8,16 +8,13 @@ import {
   type ServerModelInfo,
 } from './models.js';
 import { postJsonUpstream } from '../upstream-forward.js';
-import { Readable } from 'node:stream';
-import { translateRequest, translateResponse, translateStream, type TranslateRequestOptions } from '../proxy.js';
+import { createLanguageModel, isSdkMigratedNpm } from '../provider-factory.js';
 import {
-  isOpenAIChatCompletionsUrl,
-  modelPrefersResponsesApi,
-  openAIResponsesUrl,
-  translateFromResponses,
-  translateStreamResponses,
-  translateToResponses,
-} from '../proxy-responses.js';
+  translateRequest as sdkTranslateRequest,
+  streamAnthropicResponse,
+  generateAnthropicResponse,
+  type AnthropicRequest,
+} from '../sdk-adapter.js';
 
 export interface ServerBackend {
   baseUrl: string;
@@ -140,57 +137,39 @@ async function handleAnthropicMessages(
   }
 
   if (model.modelFormat === 'openai') {
-    const completionsUrl = model.completionsUrl
-      ? model.completionsUrl
-      : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
+    if (!isSdkMigratedNpm(model.npm)) {
+      sendJson(res, 400, { error: { message: `No SDK provider for model: ${model.id}` } });
+      return;
+    }
     const apiKey = model.apiKey ?? options.apiKey;
-    const useResponses =
-      isOpenAIChatCompletionsUrl(completionsUrl) && modelPrefersResponsesApi(body.model);
-    const upstreamUrl = useResponses ? openAIResponsesUrl(completionsUrl) : completionsUrl;
-    const translateOpts: TranslateRequestOptions = { completionsUrl };
-    const upstreamBody = useResponses ? translateToResponses(body) : translateRequest(body, translateOpts);
+    const languageModel = createLanguageModel({
+      npm: model.npm!,
+      modelId: model.id,
+      apiKey,
+      baseURL: model.apiBaseUrl,
+      providerId: model.sourceBackend,
+    });
+    const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!);
     const clientWantsStream = Boolean(body.stream);
 
-    const upstreamRes = await fetch(upstreamUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(clientWantsStream ? { Accept: 'text/event-stream' } : {}),
-        'Authorization': `Bearer ${apiKey}`,
-        'X-API-Key': apiKey,
-      },
-      body: JSON.stringify(upstreamBody),
-    });
-
-    if (!upstreamRes.ok) {
-      const errText = await upstreamRes.text();
-      res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
-      res.end(errText);
-      return;
+    try {
+      if (clientWantsStream) {
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+        await streamAnthropicResponse(languageModel, params, model.id, chunk => res.write(chunk));
+        res.end();
+      } else {
+        const anthropicResponse = await generateAnthropicResponse(languageModel, params, model.id);
+        sendJson(res, 200, anthropicResponse);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) sendJson(res, 502, { error: { message } });
+      else res.end();
     }
-
-    if (clientWantsStream && upstreamRes.body) {
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      });
-      const nodeStream = Readable.fromWeb(upstreamRes.body as any);
-      const translated = useResponses
-        ? translateStreamResponses(nodeStream, body.model)
-        : translateStream(nodeStream, body.model);
-      translated.pipe(res);
-      return;
-    }
-
-    const upstreamData = await upstreamRes.json();
-    sendJson(
-      res,
-      200,
-      useResponses
-        ? translateFromResponses(upstreamData as Record<string, unknown>, body.model)
-        : translateResponse(upstreamData, body.model),
-    );
     return;
   }
 

@@ -41,6 +41,11 @@ vi.mock('../src/models.js', () => ({
   getModels: vi.fn(async () => ({ models, fromCache: false })),
 }));
 
+// Avoid spawning a real `opencode serve` subprocess during the unit test.
+vi.mock('../src/providers.js', () => ({
+  fetchLocalProviders: vi.fn(async () => null),
+}));
+
 vi.mock('../src/server/prompts.js', () => ({
   askListenMode: async () => state.listenMode,
   askSaveServerPassword: async () => state.savePassword,

@@ -4,8 +4,6 @@ import {
   extractReferencedToolNames,
   resolveUpstreamTools,
 } from '../src/tool-search.js';
-import { translateRequest } from '../src/proxy.js';
-import { translateToGemini } from '../src/proxy-gemini.js';
 
 const coreTools = [
   { name: 'Bash', description: 'Run bash', input_schema: { type: 'object', properties: {} } },
@@ -88,32 +86,5 @@ describe('resolveUpstreamTools', () => {
     );
     expect(upstream.map(t => t.name)).toContain('mcp_playwright_click');
     expect(upstream.map(t => t.name)).not.toContain('mcp_context7_resolve');
-  });
-});
-
-describe('proxy tool filtering integration', () => {
-  const allTools = [...coreTools, ...deferredTools, toolSearchTool];
-
-  it('translateRequest forwards filtered tools to OpenAI', () => {
-    const result = translateRequest({
-      model: 'test',
-      messages: [{ role: 'user', content: 'hey' }],
-      tools: allTools,
-    });
-    expect((result.tools as Array<{ function: { name: string } }>).map(t => t.function.name)).toEqual([
-      'Bash',
-      'Read',
-      'tool_search_tool_regex',
-    ]);
-  });
-
-  it('translateToGemini forwards filtered tools to Gemini', () => {
-    const result = translateToGemini({
-      model: 'gemini-test',
-      messages: [{ role: 'user', content: 'hey' }],
-      tools: allTools,
-    });
-    const decls = (result.tools as Array<{ functionDeclarations: Array<{ name: string }> }>)[0].functionDeclarations;
-    expect(decls.map(d => d.name)).toEqual(['Bash', 'Read', 'tool_search_tool_regex']);
   });
 });

@@ -180,41 +180,27 @@ describe('server router', () => {
     });
   });
 
-  it('translates Anthropic messages for OpenAI-format models through existing proxy helpers', async () => {
-    const upstream = await startUpstream({
-      choices: [{ message: { content: 'translated ok' }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 3, completion_tokens: 4 },
-    });
-    handles.push(upstream);
-    const server = await startTestServer({
-      backends: {
-        zen: { baseUrl: upstream.baseUrl },
-        go: { baseUrl: upstream.baseUrl },
-      },
-    });
+  // OpenAI-format Anthropic translation now routes through the Vercel AI SDK adapter
+  // (createLanguageModel + streamAnthropicResponse/generateAnthropicResponse), which
+  // requires an SDK `npm` on the model. Translation correctness is covered by
+  // sdk-adapter.test.ts and the spike's real-provider validation. Here we only assert
+  // the router's guard: an OpenAI-format model with no SDK provider is rejected.
+  it('rejects Anthropic messages for OpenAI-format models without an SDK provider', async () => {
+    const server = await startTestServer();
 
     const response = await fetch(`${server.url}/anthropic/v1/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'openai-format',
-        system: 'Be brief.',
         messages: [{ role: 'user', content: 'hi' }],
       }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({
-      type: 'message',
-      content: [{ text: 'translated ok', type: 'text' }],
-      usage: { input_tokens: 3, output_tokens: 4 },
+      error: { message: expect.stringContaining('No SDK provider') },
     });
-    expect(upstream.requests[0]).toMatchObject({
-      method: 'POST',
-      url: '/v1/chat/completions',
-      authorization: 'Bearer real-opencode-key',
-    });
-    expect(upstream.requests[0].body.messages[0]).toEqual({ role: 'system', content: 'Be brief.' });
   });
 
   it('forwards OpenAI chat completions for OpenAI-format models unchanged', async () => {

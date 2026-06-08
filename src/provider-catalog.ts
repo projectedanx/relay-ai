@@ -88,10 +88,35 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
         cost: model.cost,
         baseUrl: model.baseUrl,
         completionsUrl: model.completionsUrl,
+        npm: model.npm,
+        apiBaseUrl: model.apiBaseUrl,
         apiKey: provider.apiKey,
         contextWindow: model.contextWindow,
       });
     }
   }
   return models;
+}
+
+// Cloud Zen/Go models. Anthropic-format models stay direct passthrough (no npm);
+// openai-format models route through the SDK via @ai-sdk/openai-compatible with the
+// backend's /v1 base URL — matching the CLI catalog's zenGoModelToRoute.
+export function zenGoModelsToServerModels(models: ModelInfo[]): ServerModelInfo[] {
+  return models.map(model => {
+    const base: ServerModelInfo = {
+      id: model.id,
+      name: model.name,
+      isFree: model.isFree,
+      brand: model.brand,
+      sourceBackend: model.sourceBackend,
+      modelFormat: model.modelFormat as 'anthropic' | 'openai',
+      cost: model.cost,
+      contextWindow: model.contextWindow,
+    };
+    if (model.modelFormat === 'openai') {
+      base.npm = '@ai-sdk/openai-compatible';
+      base.apiBaseUrl = `${BACKENDS[model.sourceBackend].baseUrl}/v1`;
+    }
+    return base;
+  });
 }

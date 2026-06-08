@@ -8,7 +8,7 @@ import {
   setSavedServerPassword,
 } from '../config.js';
 import { BACKENDS } from '../constants.js';
-import { fetchZenGoModels, localProvidersToServerModels } from '../provider-catalog.js';
+import { fetchZenGoModels, localProvidersToServerModels, zenGoModelsToServerModels } from '../provider-catalog.js';
 import { fetchLocalProviders } from '../providers.js';
 import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo } from './models.js';
@@ -93,8 +93,8 @@ async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo
 
   if (zenGoBackends.length > 0) {
     const zenGo = await fetchZenGoModels(zenGoBackends, true);
-    if (needsZen) models.push(...modelsForTier(tier, 'zen', zenGo.zenModels));
-    if (needsGo) models.push(...modelsForTier(tier, 'go', zenGo.goModels));
+    if (needsZen) models.push(...zenGoModelsToServerModels(modelsForTier(tier, 'zen', zenGo.zenModels)));
+    if (needsGo) models.push(...zenGoModelsToServerModels(modelsForTier(tier, 'go', zenGo.goModels)));
   }
 
   try {

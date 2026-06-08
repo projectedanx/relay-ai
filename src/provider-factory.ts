@@ -10,7 +10,33 @@ import { createXai } from '@ai-sdk/xai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import type { LanguageModel } from 'ai';
-import { modelPrefersResponsesApi } from './proxy-responses.js';
+
+/** Models that must use /v1/responses instead of /v1/chat/completions. */
+const RESPONSES_ONLY_PREFIXES = [
+  'gpt-5.4',
+  'gpt-5.5',
+  'gpt-5-codex',
+  'gpt-5-pro',
+  'gpt-5.2-pro',
+  'o3',
+  'o4',
+];
+
+/**
+ * True when a model id must use the OpenAI/xAI Responses API instead of
+ * chat/completions. The SDK reflects this by selecting `provider.responses(id)`.
+ */
+export function modelPrefersResponsesApi(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  if (RESPONSES_ONLY_PREFIXES.some(prefix => lower === prefix || lower.startsWith(`${prefix}-`))) {
+    return true;
+  }
+  // Versioned Codex IDs (e.g. gpt-5.3-codex) don't match the gpt-5-codex prefix.
+  if (lower.startsWith('gpt-') && lower.includes('-codex')) return true;
+  // xAI multiagent models (e.g. grok-4.20-multi-agent, grok-4.2-multiagent).
+  if (lower.startsWith('grok-') && (lower.includes('multi-agent') || lower.includes('multiagent'))) return true;
+  return false;
+}
 
 export interface ProviderModelSpec {
   /** OpenCode `api.npm` package, e.g. `@ai-sdk/xai`. */
