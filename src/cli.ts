@@ -110,7 +110,7 @@ Launch AI coding tools with OpenCode Zen, Go, or local providers (Groq, Mistral,
 OpenAI, Gemini, Ollama, and more).
 
 ${pc.bold('Usage:')}
-  relay-ai claude [starter-options] [claude-flags]
+  relay-ai claude [options] [claude-flags]
   relay-ai models
   relay-ai server
   relay-ai --help
@@ -140,11 +140,11 @@ export function claudeHelpText(): string {
 Launch Claude Code with OpenCode Zen, Go, or local providers as the API backend.
 
 ${pc.bold('Usage:')}
-  relay-ai claude [starter-options] [claude-flags]
+  relay-ai claude [options] [claude-flags]
   relay-ai claude --help
   relay-ai claude --version
 
-${pc.bold('Starter options:')}
+${pc.bold('Options:')}
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --setup      Re-configure your subscription tier
   --trace      Write debug logs to /tmp and show errors on exit

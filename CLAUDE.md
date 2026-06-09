@@ -19,7 +19,9 @@ relay-ai --help
 relay-ai models          # manage favorite models for mid-session switching
 relay-ai claude --dry-run   # simulate full first-run without writing anything
 relay-ai claude --setup    # re-ask subscription tier
-relay-ai claude --trace    # write Claude Code debug log to /tmp and print errors on exit
+relay-ai claude --trace    # write debug log to /tmp/relay-ai-debug.log and print errors on exit
+relay-ai server           # foreground OpenCode API gateway
+relay-ai server --vertex  # foreground Vertex AI gateway (gcloud ADC)
 
 # Rebuild after code changes before testing manually
 npm run build && relay-ai --version
@@ -138,14 +140,9 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `startProxyCatalog(routes, startingAliasId, debug)` — multi-route catalog proxy for switch-menu sessions.
 - `MAX_MODEL_CATALOG = 20` in `constants.ts` — favorites cap and max routes in catalog.
 
-## Release status (v0.3.0 — unreleased, prepping)
+## Release status (v0.1.0)
 
-Last published/tagged version is **v0.2.5**. Everything since — local providers, Gemini/OpenAI-Responses/Mistral support via the SDK adapter, the `relay-ai models` favorites manager, `startProxyCatalog` switch menu, model search/browse UX — ships together as **0.3.0** (not yet tagged or on npm). `package.json` is at `0.3.0`; CHANGELOG `[0.3.0]` holds the consolidated net-of-0.2.5 notes.
-
-**Pre-release checklist:**
-- Broader manual testing of local providers (Groq, Mistral, xAI, Anthropic-direct, Ollama).
-- Ollama note: must set a non-empty placeholder key in OpenCode config (Ollama ignores the auth header).
-- Tag `v0.3.0` and publish to npm once validated.
+Current version is **v0.1.0** — relay-ai rebrand from opencode-starter plus Vertex gateway (`relay-ai server --vertex`). Prior feature work (local providers, SDK adapter, favorites/switch menu, server wizard) is consolidated in CHANGELOG under `[0.3.0]` from the pre-rebrand lineage.
 
 **Known limitations (by design):**
 - Cost display in Claude Code is always inaccurate for non-Anthropic models.

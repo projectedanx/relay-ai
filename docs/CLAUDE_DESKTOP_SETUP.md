@@ -27,7 +27,8 @@ For Anthropic's upstream docs, see [Installation and setup](https://claude.com/d
 
 | Piece | Role |
 | --- | --- |
-| `relay-ai server` | Local gateway on port **17645**. Anthropic Messages API + model discovery |
+| `relay-ai server` | Local OpenCode gateway on port **17645** — Zen, Go, and OpenCode-configured providers |
+| `relay-ai server --vertex` | Local Vertex gateway on port **17645** — Claude on Google Vertex AI via gcloud ADC |
 | Claude Desktop gateway config | Desktop sends inference to your machine instead of only claude.ai |
 | Server wizard filters | Exposed providers, optional favorites-only catalog, discovery id masking |
 | **Cowork** tab | Agentic sessions (files, research, multi-step tasks) against your gateway models |
@@ -42,14 +43,15 @@ Billing runs through your OpenCode / OpenCode-configured provider keys. Keep the
 ## Prerequisites
 
 1. **Relay AI** installed (`npm install -g relay-ai`).
-2. **OpenCode API key** configured at least once:
+2. **OpenCode API key** configured at least once (for `relay-ai server` only — not required for `--vertex`):
    ```bash
    relay-ai claude --setup   # subscription tier, if not set
    relay-ai claude           # stores key in Keychain / credential store
    ```
 3. **Latest Claude Desktop** from [claude.com/download](https://claude.com/download). Older builds may not show the third-party inference UI.
-4. *(Optional)* **OpenCode CLI** with providers configured. Whatever you've set up in OpenCode (Groq, Mistral, OpenAI, Gemini, Ollama, etc.) appears in the server catalog automatically.
+4. *(Optional, OpenCode server only)* **OpenCode CLI** with providers configured. Whatever you've set up in OpenCode (Groq, Mistral, OpenAI, Gemini, Ollama, etc.) appears in the server catalog automatically.
 5. *(Optional)* **Favorites** via `relay-ai models` to cap the catalog at up to 20 models.
+6. *(Vertex server only)* **Google Cloud SDK** with `gcloud auth application-default login`, plus a GCP project with Vertex AI and Claude partner models enabled.
 
 ---
 
@@ -60,6 +62,16 @@ In a terminal, start the gateway and **leave it running**:
 ```bash
 relay-ai server
 ```
+
+For **Claude on Google Vertex AI** instead of OpenCode backends:
+
+```bash
+gcloud auth application-default login
+export ANTHROPIC_VERTEX_PROJECT_ID="your-gcp-project"
+relay-ai server --vertex
+```
+
+Same port, same Desktop configuration below. No OpenCode API key required. Default models: `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5`. See [README — Vertex gateway](../README.md#vertex-gateway-relay-ai-server---vertex) for aliases, custom catalogs, and Claude Code env tips.
 
 First-time wizard recommendations:
 
@@ -264,7 +276,7 @@ Enable **Mask gateway model ids for discovery**, restart the server, relaunch Cl
 
 ### `Missing OPENCODE_API_KEY` when starting the server
 
-Run `relay-ai claude` once to store your key, or export `OPENCODE_API_KEY` before `relay-ai server`.
+Only applies to `relay-ai server` (not `--vertex`). Run `relay-ai claude` once to store your key, or export `OPENCODE_API_KEY` before `relay-ai server`.
 
 ### `Missing subscription tier`
 
@@ -293,3 +305,4 @@ relay-ai claude --setup
 | User identity and local data | [claude.com/docs/cowork/3p/data-storage](https://claude.com/docs/cowork/3p/data-storage) |
 | Claude Desktop download | [claude.com/download](https://claude.com/download) |
 | Relay AI server mode | [README — Server mode](../README.md#server-mode) |
+| Relay AI Vertex gateway | [README — Vertex gateway](../README.md#vertex-gateway-relay-ai-server---vertex) |

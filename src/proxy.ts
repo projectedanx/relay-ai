@@ -15,7 +15,7 @@ import {
 
 type ProxyLog = (message: string | (() => string)) => void;
 
-function makeProxyLog(debug: boolean, logPath = '/tmp/opencode-proxy-debug.log'): ProxyLog {
+function makeProxyLog(debug: boolean, logPath = '/tmp/relay-ai-proxy-debug.log'): ProxyLog {
   if (!debug) return () => {};
   return (message) => {
     try {

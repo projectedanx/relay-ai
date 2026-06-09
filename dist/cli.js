@@ -1007,7 +1007,7 @@ async function generateAnthropicResponse(model, params, modelId) {
 }
 
 // src/proxy.ts
-function makeProxyLog(debug, logPath = "/tmp/opencode-proxy-debug.log") {
+function makeProxyLog(debug, logPath = "/tmp/relay-ai-proxy-debug.log") {
   if (!debug) return () => {
   };
   return (message) => {
@@ -3079,7 +3079,7 @@ Launch AI coding tools with OpenCode Zen, Go, or local providers (Groq, Mistral,
 OpenAI, Gemini, Ollama, and more).
 
 ${pc4.bold("Usage:")}
-  relay-ai claude [starter-options] [claude-flags]
+  relay-ai claude [options] [claude-flags]
   relay-ai models
   relay-ai server
   relay-ai --help
@@ -3108,11 +3108,11 @@ function claudeHelpText() {
 Launch Claude Code with OpenCode Zen, Go, or local providers as the API backend.
 
 ${pc4.bold("Usage:")}
-  relay-ai claude [starter-options] [claude-flags]
+  relay-ai claude [options] [claude-flags]
   relay-ai claude --help
   relay-ai claude --version
 
-${pc4.bold("Starter options:")}
+${pc4.bold("Options:")}
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --setup      Re-configure your subscription tier
   --trace      Write debug logs to /tmp and show errors on exit
