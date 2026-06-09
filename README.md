@@ -14,8 +14,6 @@ Pick your backend:
 - **OpenCode-configured providers** — BYOK providers you've already set up in [OpenCode](https://opencode.ai) (Groq, Mistral, OpenAI, Gemini, Ollama, Cerebras, Perplexity, Bedrock, and others)
 - **Google Vertex AI** — Claude on Vertex via `relay-ai server --vertex` and local gcloud credentials (no OpenCode key required)
 
-[![Watch the demo on YouTube](https://img.youtube.com/vi/kyeqlyF4WCQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=kyeqlyF4WCQ)
-
 ## Commands
 
 | Command | Description |
