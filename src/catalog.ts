@@ -63,12 +63,18 @@ export function buildCatalogRoutes(
   favorites: FavoriteModel[],
   resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
   max = MAX_MODEL_CATALOG,
-): ProxyRoute[] {
+): { routes: ProxyRoute[]; droppedFavorites: FavoriteModel[] } {
+  const droppedFavorites: FavoriteModel[] = [];
   const tail = favorites
-    .map(fav => resolveRoute(fav.providerId, fav.modelId))
+    .map(fav => {
+      const route = resolveRoute(fav.providerId, fav.modelId);
+      if (!route) droppedFavorites.push(fav);
+      return route;
+    })
     .filter((route): route is ProxyRoute => route !== undefined);
-  return [
+  const routes = [
     startingRoute,
     ...tail.filter(route => route.aliasId !== startingRoute.aliasId),
   ].slice(0, max);
+  return { routes, droppedFavorites };
 }

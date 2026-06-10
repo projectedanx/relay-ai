@@ -14,7 +14,8 @@ import {
   type ProviderTemplate,
 } from './provider-templates.js';
 import { addProviderFromTemplate } from './registry/add-template.js';
-import { importFromOpencode } from './registry/import-opencode.js';
+import { addCustomEndpointProvider } from './registry/custom-endpoint.js';
+import { importFromOpencode, type ImportConflictChoice, type ImportConflictContext } from './registry/import-opencode.js';
 import {
   addGoRegistryStub,
   addZenRegistryStub,
@@ -89,9 +90,31 @@ function providerLabel(name: string, modelCount: number, enabled: boolean): stri
 }
 
 export async function runProvidersImport(): Promise<number> {
+  const registry = loadRegistry();
+  const hasExisting = registry.providers.length > 0;
+
+  const resolveConflict = hasExisting
+    ? async (ctx: ImportConflictContext): Promise<ImportConflictChoice> => {
+        p.note(
+          `Existing: ${ctx.existingKeyHint}\nImported: ${ctx.incomingKeyHint}`,
+          `Provider "${ctx.existing.name}" already configured`,
+        );
+        const choice = await p.select({
+          message: 'Which configuration should we keep?',
+          options: [
+            { value: 'keep', label: 'Keep mine', hint: 'Leave your current relay-ai config unchanged' },
+            { value: 'import', label: 'Use imported', hint: 'Replace with OpenCode settings and refresh models' },
+            { value: 'skip', label: 'Skip this provider', hint: '' },
+          ],
+        });
+        if (p.isCancel(choice)) return 'skip' as ImportConflictChoice;
+        return choice as ImportConflictChoice;
+      }
+    : undefined;
+
   const spinner = p.spinner();
   spinner.start('Importing from OpenCode...');
-  const result = await importFromOpencode();
+  const result = await importFromOpencode({ resolveConflict });
   spinner.stop('');
 
   if (result.error) {
@@ -113,7 +136,11 @@ export async function runProvidersImport(): Promise<number> {
 
   if (result.skipped.length > 0) {
     for (const s of result.skipped) {
-      p.log.warn(`Skipped ${s.name} (${s.id}): ${s.reason}`);
+      const reason =
+        s.reason === 'user-skipped' ? 'skipped by you'
+        : s.reason === 'conflict-kept' ? 'kept your existing config'
+        : s.reason;
+      p.log.warn(`Skipped ${s.name} (${s.id}): ${reason}`);
     }
   }
   return 0;
@@ -265,6 +292,71 @@ async function addBuiltinGo(): Promise<number> {
   return 0;
 }
 
+async function runCustomEndpointAddFlow(): Promise<number> {
+  const kindChoice = await p.select({
+    message: 'Custom server type',
+    options: [
+      {
+        value: 'openai',
+        label: 'Works with most AI services',
+        hint: 'OpenAI-compatible API (Together, vLLM, Ollama, …)',
+      },
+      {
+        value: 'anthropic',
+        label: 'Claude-style API servers',
+        hint: 'Anthropic-compatible /v1/messages passthrough',
+      },
+      { value: 'back', label: 'Back', hint: '' },
+    ],
+  });
+  if (p.isCancel(kindChoice) || kindChoice === 'back') return 0;
+
+  const displayName = await p.text({
+    message: 'Display name:',
+    placeholder: 'My Work LLM',
+    validate: v => v.trim() ? undefined : 'Name is required',
+  });
+  if (p.isCancel(displayName)) return 0;
+
+  const baseUrl = await p.text({
+    message: 'Base URL:',
+    placeholder: kindChoice === 'openai' ? 'https://api.together.xyz/v1' : 'https://api.anthropic.com',
+    validate: v => v.trim() ? undefined : 'URL is required',
+  });
+  if (p.isCancel(baseUrl)) return 0;
+
+  const allowLocal = await p.confirm({
+    message: 'Allow local HTTP (Ollama / LM Studio on localhost)?',
+    initialValue: String(baseUrl).includes('127.0.0.1') || String(baseUrl).includes('localhost'),
+  });
+  if (p.isCancel(allowLocal)) return 0;
+
+  const apiKey = await p.password({
+    message: 'API key (leave empty for local servers without auth):',
+  });
+  if (p.isCancel(apiKey)) return 0;
+
+  const spinner = p.spinner();
+  spinner.start('Testing connection...');
+  const result = await addCustomEndpointProvider({
+    displayName: String(displayName).trim(),
+    baseUrl: String(baseUrl).trim(),
+    apiKey: String(apiKey ?? '').trim(),
+    kind: kindChoice as 'openai' | 'anthropic',
+    allowInsecureLocal: allowLocal === true,
+  });
+  spinner.stop('');
+
+  if (!result.added) {
+    p.log.error(result.error ?? 'Could not add custom provider.');
+    if (result.hint) p.log.info(result.hint);
+    return 1;
+  }
+
+  p.log.success(`Connected · ${result.modelCount} model${result.modelCount === 1 ? '' : 's'} — ${result.provider?.name} saved.`);
+  return 0;
+}
+
 export async function runProvidersAdd(): Promise<number> {
   const registry = loadRegistry();
   const zenGo = await resolveZenGoAvailability();
@@ -289,6 +381,11 @@ export async function runProvidersAdd(): Promise<number> {
       hint: `${addableTemplates.length} provider${addableTemplates.length === 1 ? '' : 's'} available`,
     });
   }
+  options.push({
+    value: 'custom',
+    label: 'Custom server (Advanced)',
+    hint: 'OpenAI-compatible or Claude-style API URL',
+  });
 
   const choice = await p.select({ message: 'Add a provider', options });
   if (p.isCancel(choice)) {
@@ -306,6 +403,7 @@ export async function runProvidersAdd(): Promise<number> {
   if (choice === 'zen') return addBuiltinZen();
   if (choice === 'go') return addBuiltinGo();
   if (choice === 'templates') return runTemplateAddFlow();
+  if (choice === 'custom') return runCustomEndpointAddFlow();
   return 0;
 }
 

@@ -1,6 +1,6 @@
 // src/registry/import-opencode.ts — one-shot import from OpenCode serve API
 
-import { saveProviderCredential } from '../env.js';
+import { resolveProviderCredential, saveProviderCredential } from '../env.js';
 import { fetchLocalProviders } from '../providers.js';
 import type { LocalProvider } from '../types.js';
 import { localProviderToRegistry } from './convert.js';
@@ -8,7 +8,17 @@ import { loadRegistry, saveRegistry } from './io.js';
 import type { RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
 
-export type ImportSkipReason = 'invalid-id' | 'no-models' | 'convert-failed';
+export type ImportSkipReason = 'invalid-id' | 'no-models' | 'convert-failed' | 'user-skipped' | 'conflict-kept';
+
+export interface ImportConflictContext {
+  existing: RegistryProvider;
+  incoming: RegistryProvider;
+  incomingProvider: LocalProvider;
+  existingKeyHint: string;
+  incomingKeyHint: string;
+}
+
+export type ImportConflictChoice = 'keep' | 'import' | 'skip';
 
 export interface ImportOpencodeResult {
   imported: RegistryProvider[];
@@ -17,12 +27,24 @@ export interface ImportOpencodeResult {
   error?: string;
 }
 
+export interface ImportOpencodeOptions {
+  resolveConflict?: (ctx: ImportConflictContext) => Promise<ImportConflictChoice>;
+}
+
 async function saveProviderKey(provider: LocalProvider): Promise<boolean> {
   if (!provider.apiKey?.trim()) return false;
   return saveProviderCredential(`keyring:provider:${provider.id}`, provider.apiKey);
 }
 
-export async function importFromOpencode(): Promise<ImportOpencodeResult> {
+async function keyHint(providerId: string, authRef: string, fallbackKey?: string): Promise<string> {
+  const fromStore = await resolveProviderCredential(providerId, authRef);
+  const key = fromStore ?? fallbackKey ?? '';
+  if (!key) return 'no key';
+  if (key.length <= 5) return '····' + key;
+  return '····' + key.slice(-5);
+}
+
+export async function importFromOpencode(options: ImportOpencodeOptions = {}): Promise<ImportOpencodeResult> {
   const fetched = await fetchLocalProviders();
   if (fetched === null) {
     return {
@@ -54,6 +76,27 @@ export async function importFromOpencode(): Promise<ImportOpencodeResult> {
     }
 
     const existingIdx = registry.providers.findIndex(p => p.id === entry.id);
+    const existing = existingIdx >= 0 ? registry.providers[existingIdx]! : undefined;
+
+    if (existing && options.resolveConflict) {
+      const choice = await options.resolveConflict({
+        existing,
+        incoming: entry,
+        incomingProvider: lp,
+        existingKeyHint: await keyHint(existing.id, existing.authRef),
+        incomingKeyHint: await keyHint(entry.id, entry.authRef, lp.apiKey),
+      });
+
+      if (choice === 'skip') {
+        skipped.push({ id: lp.id, name: lp.name, reason: 'user-skipped' });
+        continue;
+      }
+      if (choice === 'keep') {
+        skipped.push({ id: lp.id, name: lp.name, reason: 'conflict-kept' });
+        continue;
+      }
+    }
+
     if (existingIdx >= 0) {
       registry.providers[existingIdx] = { ...entry, addedAt: registry.providers[existingIdx]!.addedAt };
     } else {

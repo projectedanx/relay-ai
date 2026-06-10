@@ -35,10 +35,11 @@ export async function fetchZenGoModels(
   return { zenModels, goModels };
 }
 
-/** Registry-first local provider resolution; falls back to ephemeral OpenCode serve. */
+/** Registry-first local provider resolution; optional legacy OpenCode serve fallback. */
 export async function resolveLocalProviders(): Promise<LocalProvider[]> {
   const fromRegistry = await loadRegistryProviders();
   if (fromRegistry.length > 0) return fromRegistry;
+  if (process.env['RELAY_AI_LEGACY_SERVE'] === '0') return [];
   const fromOpencode = await fetchLocalProviders();
   return fromOpencode ?? [];
 }

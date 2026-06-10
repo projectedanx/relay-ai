@@ -857,19 +857,6 @@ function mergeModels(apiIds, cache, backendId) {
     };
   });
 }
-function groupModels(models) {
-  const free = models.filter((m) => m.isFree).sort((a, b) => a.id.localeCompare(b.id));
-  const byBrand = /* @__PURE__ */ new Map();
-  for (const m of models.filter((m2) => !m2.isFree)) {
-    const list = byBrand.get(m.brand) ?? [];
-    list.push(m);
-    byBrand.set(m.brand, list);
-  }
-  for (const [brand, list] of byBrand) {
-    byBrand.set(brand, list.sort((a, b) => a.id.localeCompare(b.id)));
-  }
-  return { free, byBrand };
-}
 async function getModels(backend, fallbackModels) {
   const cache = readModelsFromCache(backend.id);
   try {
@@ -1058,6 +1045,17 @@ var PROVIDER_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 function isValidProviderId(id) {
   return PROVIDER_ID_PATTERN.test(id);
 }
+function slugifyProviderId(displayName) {
+  const base = displayName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!base) return "custom-provider";
+  if (isValidProviderId(base)) return base;
+  const trimmed = base.replace(/^-+|-+$/g, "");
+  return isValidProviderId(trimmed) ? trimmed : `custom-${trimmed.slice(0, 40)}`;
+}
+function customProviderId(displayName) {
+  const slug = slugifyProviderId(displayName);
+  return slug.startsWith("custom-") ? slug : `custom-${slug}`;
+}
 
 // src/registry/convert.ts
 function modelToCached(model) {
@@ -1224,7 +1222,14 @@ async function saveProviderKey(provider) {
   if (!provider.apiKey?.trim()) return false;
   return saveProviderCredential(`keyring:provider:${provider.id}`, provider.apiKey);
 }
-async function importFromOpencode() {
+async function keyHint(providerId, authRef, fallbackKey) {
+  const fromStore = await resolveProviderCredential(providerId, authRef);
+  const key = fromStore ?? fallbackKey ?? "";
+  if (!key) return "no key";
+  if (key.length <= 5) return "\xB7\xB7\xB7\xB7" + key;
+  return "\xB7\xB7\xB7\xB7" + key.slice(-5);
+}
+async function importFromOpencode(options = {}) {
   const fetched = await fetchLocalProviders();
   if (fetched === null) {
     return {
@@ -1253,6 +1258,24 @@ async function importFromOpencode() {
       continue;
     }
     const existingIdx = registry.providers.findIndex((p9) => p9.id === entry.id);
+    const existing = existingIdx >= 0 ? registry.providers[existingIdx] : void 0;
+    if (existing && options.resolveConflict) {
+      const choice = await options.resolveConflict({
+        existing,
+        incoming: entry,
+        incomingProvider: lp,
+        existingKeyHint: await keyHint(existing.id, existing.authRef),
+        incomingKeyHint: await keyHint(entry.id, entry.authRef, lp.apiKey)
+      });
+      if (choice === "skip") {
+        skipped.push({ id: lp.id, name: lp.name, reason: "user-skipped" });
+        continue;
+      }
+      if (choice === "keep") {
+        skipped.push({ id: lp.id, name: lp.name, reason: "conflict-kept" });
+        continue;
+      }
+    }
     if (existingIdx >= 0) {
       registry.providers[existingIdx] = { ...entry, addedAt: registry.providers[existingIdx].addedAt };
     } else {
@@ -2322,11 +2345,17 @@ function makeRouteResolver(localProviders, zenModels, goModels, zenGoApiKey) {
   };
 }
 function buildCatalogRoutes(startingRoute, favorites, resolveRoute, max = MAX_MODEL_CATALOG) {
-  const tail = favorites.map((fav) => resolveRoute(fav.providerId, fav.modelId)).filter((route) => route !== void 0);
-  return [
+  const droppedFavorites = [];
+  const tail = favorites.map((fav) => {
+    const route = resolveRoute(fav.providerId, fav.modelId);
+    if (!route) droppedFavorites.push(fav);
+    return route;
+  }).filter((route) => route !== void 0);
+  const routes = [
     startingRoute,
     ...tail.filter((route) => route.aliasId !== startingRoute.aliasId)
   ].slice(0, max);
+  return { routes, droppedFavorites };
 }
 
 // src/server/index.ts
@@ -2413,6 +2442,7 @@ async function fetchZenGoModels(backends, persistCache = false) {
 async function resolveLocalProviders() {
   const fromRegistry = await loadRegistryProviders();
   if (fromRegistry.length > 0) return fromRegistry;
+  if (process.env["RELAY_AI_LEGACY_SERVE"] === "0") return [];
   const fromOpencode = await fetchLocalProviders();
   return fromOpencode ?? [];
 }
@@ -2903,12 +2933,12 @@ async function selectServerProviders(available, initial) {
     return null;
   }
   let selected = resolveInitialServerProviders(initial, available);
-  const lookup = new Map(available.map((provider) => [provider.id, provider]));
+  const lookup2 = new Map(available.map((provider) => [provider.id, provider]));
   while (true) {
     const options = [];
     for (let i = 0; i < selected.length; i++) {
       const id = selected[i];
-      const provider = lookup.get(id);
+      const provider = lookup2.get(id);
       const label = provider ? `\u2605 ${provider.name}` : pc2.dim(`\u2605 ${id} \u2014 provider gone`);
       const hint = provider ? `${provider.modelCount} model${provider.modelCount !== 1 ? "s" : ""}` : "select to remove";
       options.push({ value: `prov-${i}`, label, hint: "select to remove" });
@@ -2965,7 +2995,7 @@ async function selectServerProviders(available, initial) {
       const idx = parseInt(choice.slice(5), 10);
       const id = selected[idx];
       if (!id) continue;
-      const provider = lookup.get(id);
+      const provider = lookup2.get(id);
       selected = selected.filter((_, i) => i !== idx);
       p4.log.success(`Removed ${provider?.name ?? id}.`);
     }
@@ -3391,57 +3421,6 @@ async function runServerCommand(options = {}) {
 // src/prompts.ts
 import * as p6 from "@clack/prompts";
 import pc4 from "picocolors";
-function modelLabel(model, showBackendBadge = false) {
-  if (model.modelFormat === "unsupported") {
-    return pc4.dim(`${model.name} (not yet supported)`);
-  }
-  if (model.isFree) {
-    const tag = showBackendBadge ? "(free \xB7 Zen)" : "(free)";
-    return pc4.green(`${model.name} ${tag}`);
-  }
-  return model.name;
-}
-function modelHint(model) {
-  const parts = [];
-  if (model.modelFormat === "openai") parts.push("via proxy");
-  else if (model.modelFormat === "unsupported") parts.push("needs format support");
-  if (!model.isFree) parts.push(`${model.brand} \xB7 ${model.id}`);
-  else parts.push(model.id);
-  return parts.join(" \xB7 ");
-}
-async function askSubscriptionTier() {
-  const tier = await p6.select({
-    message: "What OpenCode subscription do you have?",
-    options: [
-      {
-        value: "free",
-        label: "Free only",
-        hint: "Zen free models only \u2014 no subscription needed"
-      },
-      {
-        value: "zen",
-        label: "Zen subscription",
-        hint: "All Zen models (paid + free)"
-      },
-      {
-        value: "go",
-        label: "Go subscription",
-        hint: "All Go models"
-      },
-      {
-        value: "both",
-        label: "Both (Zen + Go)",
-        hint: "All Go models + all Zen models \u2014 choose backend each launch"
-      }
-    ],
-    initialValue: "free"
-  });
-  if (p6.isCancel(tier)) {
-    p6.cancel("Cancelled.");
-    return null;
-  }
-  return tier;
-}
 var BROWSE_ALL = "__browse_all__";
 var MAX_RECENT = 3;
 var MODEL_SEARCH_THRESHOLD = 25;
@@ -3689,82 +3668,6 @@ async function pickLocalModel(provider, conflicts, prefs) {
   }
   p6.outro(pc4.green("Launching..."));
   return selectedModel;
-}
-async function runWizard(prefs, modelsByBackend, conflicts, tier) {
-  let selectorBackendId = null;
-  if (tier === "both") {
-    const backendId = await p6.select({
-      message: "Which backend?",
-      options: [
-        { value: "zen", label: "OpenCode Zen", hint: "66+ models, free tier available" },
-        { value: "go", label: "OpenCode Go", hint: "17 models, subscription ($10/mo)" }
-      ],
-      initialValue: prefs.lastBackend ?? "zen"
-    });
-    if (p6.isCancel(backendId)) {
-      p6.cancel("Cancelled.");
-      return null;
-    }
-    selectorBackendId = backendId;
-  }
-  const showBackendBadge = tier === "go";
-  let models;
-  if (tier === "free") {
-    models = modelsByBackend.zen.filter((m) => m.isFree);
-  } else if (tier === "zen") {
-    models = modelsByBackend.zen;
-  } else if (tier === "go") {
-    const zenFree = modelsByBackend.zen.filter((m) => m.isFree);
-    models = [...zenFree, ...modelsByBackend.go];
-  } else {
-    models = selectorBackendId === "go" ? modelsByBackend.go : modelsByBackend.zen;
-  }
-  const selectableModels = [];
-  const unsupportedModels = [];
-  for (const m of models) {
-    (m.modelFormat === "unsupported" ? unsupportedModels : selectableModels).push(m);
-  }
-  const { free, byBrand } = groupModels(selectableModels);
-  const brandOrder = ["Claude", "GPT", "Gemini", "DeepSeek", "Qwen", "MiniMax", "Kimi", "GLM", "MiMo", "Grok", "Nemotron", "Other"];
-  const sortedBrands = [...byBrand.keys()].sort(
-    (a, b) => (brandOrder.indexOf(a) !== -1 ? brandOrder.indexOf(a) : 99) - (brandOrder.indexOf(b) !== -1 ? brandOrder.indexOf(b) : 99)
-  );
-  const orderedSelectable = [
-    ...free,
-    ...sortedBrands.flatMap((brand) => byBrand.get(brand) ?? [])
-  ];
-  if (orderedSelectable.length === 0) {
-    p6.cancel("No models available for this backend and subscription tier.");
-    return null;
-  }
-  const selectedModel = await selectModelWithSearch(
-    orderedSelectable,
-    (m) => ({ value: m.id, label: modelLabel(m, showBackendBadge), hint: modelHint(m) }),
-    "Which model?",
-    prefs.lastModel,
-    orderedSelectable
-  );
-  if (!selectedModel) return null;
-  if (unsupportedModels.length > 0) {
-    const brandCounts = unsupportedModels.reduce((acc, m) => {
-      acc[m.brand] = (acc[m.brand] ?? 0) + 1;
-      return acc;
-    }, {});
-    const summary = Object.entries(brandCounts).map(([b, c]) => `${b} (${c})`).join(", ");
-    p6.log.info(pc4.dim(`Not yet supported: ${summary} \u2014 need API format translation`));
-  }
-  const backend = BACKENDS[selectedModel.sourceBackend];
-  noteEnvConflicts(conflicts);
-  const confirmed = await p6.confirm({
-    message: `Launch Claude Code \xB7 ${pc4.bold(selectedModel.id)} via ${pc4.bold(backend.name)}?`,
-    initialValue: true
-  });
-  if (p6.isCancel(confirmed) || !confirmed) {
-    p6.cancel("Cancelled.");
-    return null;
-  }
-  p6.outro(pc4.green("Launching..."));
-  return { backend, model: selectedModel };
 }
 
 // src/favorites.ts
@@ -4153,6 +4056,272 @@ async function addProviderFromTemplate(template, apiKey, opts) {
   return { added: true, provider: entry, modelCount: fetched.models.length };
 }
 
+// src/registry/url-security.ts
+import { lookup } from "dns/promises";
+var BLOCKED_HOSTNAMES = /* @__PURE__ */ new Set([
+  "169.254.169.254",
+  "metadata.google.internal",
+  "169.254.170.2",
+  "fd00:ec2::254",
+  "localhost"
+]);
+function ipv4ToInt(octets) {
+  return (octets[0] << 24 | octets[1] << 16 | octets[2] << 8 | octets[3]) >>> 0;
+}
+function parseIpv4(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  const octets = parts.map((p9) => Number(p9));
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return octets;
+}
+function isBlockedIpv4(ip, allowInsecureLocal) {
+  const octets = parseIpv4(ip);
+  if (!octets) return true;
+  const n = ipv4ToInt(octets);
+  if (allowInsecureLocal && octets[0] === 127) return false;
+  if (octets[0] === 127) return true;
+  if (octets[0] === 10) return true;
+  if (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) return true;
+  if (octets[0] === 192 && octets[1] === 168) return true;
+  if (octets[0] === 169 && octets[1] === 254) return true;
+  if (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) return true;
+  return false;
+}
+function expandIpv6(ip) {
+  const lower = ip.toLowerCase();
+  if (lower.includes("::ffff:")) {
+    const mapped = lower.split("::ffff:")[1];
+    if (mapped && parseIpv4(mapped)) return mapped;
+  }
+  return lower;
+}
+function isBlockedIpv6(ip, allowInsecureLocal) {
+  const lower = ip.toLowerCase();
+  const mapped = expandIpv6(lower);
+  if (mapped && mapped !== lower) {
+    return isBlockedIpv4(mapped, allowInsecureLocal);
+  }
+  if (allowInsecureLocal && (lower === "::1" || lower === "0:0:0:0:0:0:0:1")) return false;
+  if (lower === "::1" || lower === "0:0:0:0:0:0:0:1") return true;
+  if (lower.startsWith("fe80:")) return true;
+  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
+  return false;
+}
+function isBlockedIp(ip, allowInsecureLocal) {
+  if (ip.includes(":")) return isBlockedIpv6(ip, allowInsecureLocal);
+  return isBlockedIpv4(ip, allowInsecureLocal);
+}
+async function resolveHostAddresses(hostname) {
+  if (parseIpv4(hostname)) return [hostname];
+  try {
+    const records = await lookup(hostname, { all: true, verbatim: true });
+    return records.map((r) => r.address);
+  } catch {
+    return [];
+  }
+}
+async function validateCustomEndpointUrl(rawUrl, opts = {}) {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) {
+    return { ok: false, error: "Base URL is required.", hint: "Example: https://api.example.com/v1" };
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return { ok: false, error: "Invalid URL.", hint: "Include https:// and the full base path." };
+  }
+  const allowLocal = opts.allowInsecureLocal === true;
+  const hostname = parsed.hostname.toLowerCase();
+  if (BLOCKED_HOSTNAMES.has(hostname)) {
+    return {
+      ok: false,
+      error: "This URL points to a blocked internal/metadata host.",
+      hint: "Use a public API endpoint for your provider."
+    };
+  }
+  if (parsed.protocol === "http:") {
+    if (!allowLocal) {
+      return {
+        ok: false,
+        error: "Only HTTPS URLs are allowed.",
+        hint: "For local servers (Ollama, LM Studio), enable \u201CAllow local HTTP\u201D."
+      };
+    }
+    if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "::1") {
+      return {
+        ok: false,
+        error: "HTTP is only allowed for localhost.",
+        hint: "Use https:// for remote servers, or http://127.0.0.1 for local ones."
+      };
+    }
+  } else if (parsed.protocol !== "https:") {
+    return { ok: false, error: "URL must use https:// (or http://localhost when local is allowed)." };
+  }
+  const addresses = await resolveHostAddresses(hostname);
+  if (addresses.length === 0) {
+    return {
+      ok: false,
+      error: `Could not resolve hostname: ${hostname}`,
+      hint: "Check the URL spelling and your network connection."
+    };
+  }
+  for (const addr of addresses) {
+    if (isBlockedIp(addr, allowLocal)) {
+      return {
+        ok: false,
+        error: "URL resolves to a private or restricted network address.",
+        hint: "Custom providers must use publicly reachable API endpoints (unless localhost with local HTTP enabled)."
+      };
+    }
+  }
+  const normalizedUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`.replace(/\/$/, "");
+  return { ok: true, normalizedUrl };
+}
+
+// src/registry/custom-endpoint.ts
+function npmForKind(kind) {
+  return kind === "anthropic" ? "@ai-sdk/anthropic" : "@ai-sdk/openai-compatible";
+}
+function modelFormatForKind(kind) {
+  return kind === "anthropic" ? "anthropic" : "openai";
+}
+async function testAnthropicEndpoint(baseUrl, apiKey) {
+  const root = baseUrl.replace(/\/v1\/?$/, "").replace(/\/$/, "");
+  const modelsUrl2 = `${root}/v1/models`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1e4);
+  try {
+    const response = await fetch(modelsUrl2, {
+      method: "GET",
+      headers: {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        Accept: "application/json"
+      },
+      redirect: "manual",
+      signal: controller.signal
+    });
+    if (response.ok) {
+      const json = await response.json();
+      const models = [];
+      for (const row of json.data ?? []) {
+        const id = row.id?.trim();
+        if (!id) continue;
+        models.push({
+          id,
+          name: row.name?.trim() || id,
+          upstreamModelId: id,
+          family: id.split("-")[0] ?? id,
+          brand: deriveBrand(id),
+          contextWindow: resolveContextWindow(id),
+          modelFormat: "anthropic",
+          npm: "@ai-sdk/anthropic",
+          apiUrl: root
+        });
+      }
+      if (models.length > 0) return { models, baseUrl: root };
+    }
+    if (response.status === 401 || response.status === 403) {
+      return { models: [], baseUrl: root, error: "API key was rejected.", hint: "Check your Anthropic-compatible API key." };
+    }
+    return {
+      models: [],
+      baseUrl: root,
+      error: `Could not list models (HTTP ${response.status}).`,
+      hint: "Verify the base URL supports Anthropic-compatible /v1/models or try the OpenAI-compatible option instead."
+    };
+  } catch {
+    return {
+      models: [],
+      baseUrl: root,
+      error: "Could not reach the Anthropic-compatible server.",
+      hint: "Check the base URL and that the server is running."
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function uniqueProviderId(displayName, registry) {
+  let base = customProviderId(displayName);
+  if (!base.startsWith("custom-")) base = `custom-${slugifyProviderId(displayName)}`;
+  if (!isValidProviderId(base)) base = "custom-provider";
+  if (!registry.providers.some((p9) => p9.id === base)) return base;
+  for (let i = 2; i < 100; i++) {
+    const candidate = `${base}-${i}`;
+    if (isValidProviderId(candidate) && !registry.providers.some((p9) => p9.id === candidate)) {
+      return candidate;
+    }
+  }
+  return `${base}-${Date.now()}`;
+}
+async function addCustomEndpointProvider(input) {
+  const urlCheck = await validateCustomEndpointUrl(input.baseUrl, {
+    allowInsecureLocal: input.allowInsecureLocal
+  });
+  if (!urlCheck.ok || !urlCheck.normalizedUrl) {
+    return { added: false, error: urlCheck.error, hint: urlCheck.hint };
+  }
+  const registry = loadRegistry();
+  const providerId = uniqueProviderId(input.displayName.trim(), registry);
+  const npm = npmForKind(input.kind);
+  const apiKey = input.apiKey.trim() || "local";
+  let fetched;
+  if (input.kind === "anthropic") {
+    fetched = await testAnthropicEndpoint(urlCheck.normalizedUrl, apiKey);
+  } else {
+    fetched = await fetchTemplateModels(
+      {
+        id: providerId,
+        name: input.displayName,
+        authType: apiKey === "local" ? "none" : "api",
+        npm,
+        defaultBaseUrl: urlCheck.normalizedUrl,
+        modelSource: "api-list",
+        supported: true
+      },
+      apiKey,
+      urlCheck.normalizedUrl
+    );
+  }
+  if (fetched.error || fetched.models.length === 0) {
+    return { added: false, error: fetched.error ?? "No models returned.", hint: fetched.hint };
+  }
+  if (apiKey !== "local") {
+    const saved = await saveProviderCredential(`keyring:provider:${providerId}`, apiKey);
+    if (!saved) {
+      return { added: false, error: "Could not save API key to Keychain.", hint: "Grant Keychain access and try again." };
+    }
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const entry = {
+    id: providerId,
+    templateId: input.kind === "anthropic" ? "custom-anthropic" : "custom-openai",
+    name: input.displayName.trim(),
+    enabled: true,
+    authRef: apiKey === "local" ? `keyring:provider:${providerId}` : `keyring:provider:${providerId}`,
+    api: { npm, url: fetched.baseUrl },
+    addedAt: now,
+    refreshedAt: now,
+    modelsCache: {
+      fetchedAt: now,
+      models: fetched.models.map((m) => ({
+        ...m,
+        modelFormat: modelFormatForKind(input.kind),
+        npm,
+        apiUrl: fetched.baseUrl
+      }))
+    }
+  };
+  if (apiKey === "local") {
+    await saveProviderCredential(entry.authRef, "local");
+  }
+  registry.providers.push(entry);
+  saveRegistry(registry);
+  return { added: true, provider: entry, modelCount: fetched.models.length };
+}
+
 // src/registry/crud.ts
 function credentialStillReferenced(authRef, remaining) {
   return remaining.some((p9) => p9.authRef === authRef);
@@ -4262,9 +4431,28 @@ function providerLabel(name, modelCount, enabled) {
   return `${star} ${name} (${modelCount} model${modelCount === 1 ? "" : "s"})`;
 }
 async function runProvidersImport() {
+  const registry = loadRegistry();
+  const hasExisting = registry.providers.length > 0;
+  const resolveConflict = hasExisting ? async (ctx) => {
+    p7.note(
+      `Existing: ${ctx.existingKeyHint}
+Imported: ${ctx.incomingKeyHint}`,
+      `Provider "${ctx.existing.name}" already configured`
+    );
+    const choice = await p7.select({
+      message: "Which configuration should we keep?",
+      options: [
+        { value: "keep", label: "Keep mine", hint: "Leave your current relay-ai config unchanged" },
+        { value: "import", label: "Use imported", hint: "Replace with OpenCode settings and refresh models" },
+        { value: "skip", label: "Skip this provider", hint: "" }
+      ]
+    });
+    if (p7.isCancel(choice)) return "skip";
+    return choice;
+  } : void 0;
   const spinner5 = p7.spinner();
   spinner5.start("Importing from OpenCode...");
-  const result = await importFromOpencode();
+  const result = await importFromOpencode({ resolveConflict });
   spinner5.stop("");
   if (result.error) {
     p7.log.error(result.error);
@@ -4280,7 +4468,8 @@ async function runProvidersImport() {
   );
   if (result.skipped.length > 0) {
     for (const s of result.skipped) {
-      p7.log.warn(`Skipped ${s.name} (${s.id}): ${s.reason}`);
+      const reason = s.reason === "user-skipped" ? "skipped by you" : s.reason === "conflict-kept" ? "kept your existing config" : s.reason;
+      p7.log.warn(`Skipped ${s.name} (${s.id}): ${reason}`);
     }
   }
   return 0;
@@ -4414,6 +4603,63 @@ async function addBuiltinGo() {
   p7.log.success("OpenCode Go added to your providers.");
   return 0;
 }
+async function runCustomEndpointAddFlow() {
+  const kindChoice = await p7.select({
+    message: "Custom server type",
+    options: [
+      {
+        value: "openai",
+        label: "Works with most AI services",
+        hint: "OpenAI-compatible API (Together, vLLM, Ollama, \u2026)"
+      },
+      {
+        value: "anthropic",
+        label: "Claude-style API servers",
+        hint: "Anthropic-compatible /v1/messages passthrough"
+      },
+      { value: "back", label: "Back", hint: "" }
+    ]
+  });
+  if (p7.isCancel(kindChoice) || kindChoice === "back") return 0;
+  const displayName = await p7.text({
+    message: "Display name:",
+    placeholder: "My Work LLM",
+    validate: (v) => v.trim() ? void 0 : "Name is required"
+  });
+  if (p7.isCancel(displayName)) return 0;
+  const baseUrl = await p7.text({
+    message: "Base URL:",
+    placeholder: kindChoice === "openai" ? "https://api.together.xyz/v1" : "https://api.anthropic.com",
+    validate: (v) => v.trim() ? void 0 : "URL is required"
+  });
+  if (p7.isCancel(baseUrl)) return 0;
+  const allowLocal = await p7.confirm({
+    message: "Allow local HTTP (Ollama / LM Studio on localhost)?",
+    initialValue: String(baseUrl).includes("127.0.0.1") || String(baseUrl).includes("localhost")
+  });
+  if (p7.isCancel(allowLocal)) return 0;
+  const apiKey = await p7.password({
+    message: "API key (leave empty for local servers without auth):"
+  });
+  if (p7.isCancel(apiKey)) return 0;
+  const spinner5 = p7.spinner();
+  spinner5.start("Testing connection...");
+  const result = await addCustomEndpointProvider({
+    displayName: String(displayName).trim(),
+    baseUrl: String(baseUrl).trim(),
+    apiKey: String(apiKey ?? "").trim(),
+    kind: kindChoice,
+    allowInsecureLocal: allowLocal === true
+  });
+  spinner5.stop("");
+  if (!result.added) {
+    p7.log.error(result.error ?? "Could not add custom provider.");
+    if (result.hint) p7.log.info(result.hint);
+    return 1;
+  }
+  p7.log.success(`Connected \xB7 ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} \u2014 ${result.provider?.name} saved.`);
+  return 0;
+}
 async function runProvidersAdd() {
   const registry = loadRegistry();
   const zenGo = await resolveZenGoAvailability();
@@ -4437,6 +4683,11 @@ async function runProvidersAdd() {
       hint: `${addableTemplates.length} provider${addableTemplates.length === 1 ? "" : "s"} available`
     });
   }
+  options.push({
+    value: "custom",
+    label: "Custom server (Advanced)",
+    hint: "OpenAI-compatible or Claude-style API URL"
+  });
   const choice = await p7.select({ message: "Add a provider", options });
   if (p7.isCancel(choice)) {
     p7.cancel("Cancelled.");
@@ -4452,6 +4703,7 @@ async function runProvidersAdd() {
   if (choice === "zen") return addBuiltinZen();
   if (choice === "go") return addBuiltinGo();
   if (choice === "templates") return runTemplateAddFlow();
+  if (choice === "custom") return runCustomEndpointAddFlow();
   return 0;
 }
 async function runProvidersRemove(id, interactive = false) {
@@ -4980,6 +5232,9 @@ async function runClaudeCommand(parsed) {
   const switchMenuActive = favorites.length > 0;
   const hasZenGoFavorites = favorites.some((f) => f.providerId === "zen" || f.providerId === "go");
   p8.intro(pc6.bold("  Relay AI"));
+  if (setup && !dryRun) {
+    p8.log.info("Provider setup now lives in relay-ai providers \u2014 opening that next is recommended.");
+  }
   if (!dryRun && await needsFirstRunSetup()) {
     const firstRun = await runFirstRunWizard(trace);
     if (firstRun === "cancel") return 0;
@@ -4988,9 +5243,9 @@ async function runClaudeCommand(parsed) {
   let earlyZenModels = [];
   let earlyGoModels = [];
   if (switchMenuActive && hasZenGoFavorites && !dryRun) {
-    const apiKey2 = await resolveOrCollectApiKey(false, trace);
-    if (!apiKey2) return 0;
-    earlyEffectiveKey = apiKey2;
+    const apiKey = await resolveOrCollectApiKey(false, trace);
+    if (!apiKey) return 0;
+    earlyEffectiveKey = apiKey;
     const zenGoSpinner = p8.spinner();
     zenGoSpinner.start("Fetching OpenCode models for switch menu...");
     try {
@@ -5007,252 +5262,217 @@ async function runClaudeCommand(parsed) {
       p8.log.warn(`Could not fetch OpenCode models (${detail}) \u2014 Zen/Go favorites will be skipped from /model catalog`);
     }
   }
-  const providerSpinner = p8.spinner();
-  providerSpinner.start("Loading your providers...");
-  const resolvedLocal = await resolveLocalProviders();
-  const localProviders = resolvedLocal.length > 0 ? resolvedLocal : null;
-  providerSpinner.stop("");
-  if (!localProviders) {
-    p8.log.info(pc6.dim("Tip: Add providers with relay-ai providers"));
+  const catalogSpinner = p8.spinner();
+  catalogSpinner.start("Loading your providers...");
+  let catalog;
+  try {
+    catalog = await fetchProviderCatalog({ persistCache: !dryRun });
+  } catch (err) {
+    catalogSpinner.stop("");
+    console.error(pc6.red(String(err instanceof Error ? err.message : err)));
+    return 1;
   }
-  let providerChoice = "opencode";
-  if (localProviders !== null && localProviders.length > 0) {
-    const providerOptions = [
-      { value: "opencode", label: "OpenCode (Zen / Go)", hint: "Cloud API \u2014 requires OpenCode subscription" },
-      ...localProviders.map((lp) => ({
-        value: lp.id,
-        label: lp.name,
-        hint: `${lp.models.length} model${lp.models.length !== 1 ? "s" : ""} available`
-      }))
-    ];
-    const initialProvider = prefs.lastProvider && providerOptions.some((o) => o.value === prefs.lastProvider) ? prefs.lastProvider : "opencode";
-    const chosen = await p8.select({
-      message: "Which provider?",
-      options: providerOptions,
-      initialValue: initialProvider
+  catalogSpinner.stop("");
+  const allProviders = providersForPicker(catalog);
+  if (allProviders.length === 0) {
+    p8.log.warn("No providers available.");
+    p8.log.info(pc6.dim("Run relay-ai providers add or import to get started."));
+    return 0;
+  }
+  const migrateLastProvider = (id) => id === "opencode" ? "zen" : id;
+  const providerOptions = allProviders.map((lp) => ({
+    value: lp.id,
+    label: lp.name,
+    hint: `${lp.models.length} model${lp.models.length !== 1 ? "s" : ""} available`
+  }));
+  const migratedLast = migrateLastProvider(prefs.lastProvider);
+  const initialProvider = migratedLast && providerOptions.some((o) => o.value === migratedLast) ? migratedLast : providerOptions[0].value;
+  const chosen = await p8.select({
+    message: "Which provider?",
+    options: providerOptions,
+    initialValue: initialProvider
+  });
+  if (p8.isCancel(chosen)) {
+    p8.cancel("Cancelled.");
+    return 0;
+  }
+  const providerChoice = chosen;
+  let activeProvider = allProviders.find((lp) => lp.id === providerChoice);
+  const isZenGo = providerChoice === "zen" || providerChoice === "go";
+  let zenGoApiKey = earlyEffectiveKey;
+  if (isZenGo && !dryRun) {
+    zenGoApiKey = zenGoApiKey ?? await resolveOrCollectApiKey(false, trace);
+    if (!zenGoApiKey) return 0;
+    activeProvider = { ...activeProvider, apiKey: zenGoApiKey };
+  }
+  const selectedModel = await pickLocalModel(activeProvider, conflicts, prefs);
+  if (!selectedModel) return 0;
+  if (!dryRun) {
+    const prevRecent = prefs.recentModelsByProvider?.[activeProvider.id] ?? [];
+    const updatedRecent = [selectedModel.id, ...prevRecent.filter((id) => id !== selectedModel.id)].slice(0, 3);
+    savePreferences({
+      lastProvider: activeProvider.id,
+      lastModel: selectedModel.id,
+      recentModelsByProvider: { ...prefs.recentModelsByProvider, [activeProvider.id]: updatedRecent }
     });
-    if (p8.isCancel(chosen)) {
-      p8.cancel("Cancelled.");
-      return 0;
-    }
-    providerChoice = chosen;
   }
-  if (providerChoice !== "opencode") {
-    const provider = localProviders.find((lp) => lp.id === providerChoice);
-    const selectedModel = await pickLocalModel(provider, conflicts, prefs);
-    if (!selectedModel) return 0;
-    if (!dryRun) {
-      const prevRecent = prefs.recentModelsByProvider?.[provider.id] ?? [];
-      const updatedRecent = [selectedModel.id, ...prevRecent.filter((id) => id !== selectedModel.id)].slice(0, 3);
-      savePreferences({
-        lastProvider: provider.id,
-        lastModel: selectedModel.id,
-        recentModelsByProvider: { ...prefs.recentModelsByProvider, [provider.id]: updatedRecent }
-      });
+  const localProviders = catalog.localProviders.length > 0 ? catalog.localProviders : null;
+  const effectiveZenGoKey = isZenGo ? zenGoApiKey ?? "dry-run-placeholder" : zenGoApiKey;
+  const zenGoModelInfo = isZenGo ? (providerChoice === "zen" ? catalog.zenModels : catalog.goModels).find((m) => m.id === selectedModel.id) : void 0;
+  if (switchMenuActive) {
+    const resolveRoute = makeRouteResolver(
+      localProviders,
+      catalog.zenModels,
+      catalog.goModels,
+      effectiveZenGoKey
+    );
+    const startingRoute = isZenGo && zenGoModelInfo ? zenGoModelToRoute(zenGoModelInfo, activeProvider.apiKey) : localModelToRoute(activeProvider, selectedModel);
+    if (!startingRoute) {
+      p8.log.error("Could not resolve a proxy route for the selected model.");
+      return 1;
     }
-    if (switchMenuActive) {
-      const resolveRoute = makeRouteResolver(
-        localProviders,
-        earlyZenModels,
-        earlyGoModels,
-        earlyEffectiveKey
-      );
-      const startingRoute = localModelToRoute(provider, selectedModel);
-      if (!startingRoute) {
-        p8.log.error("Could not resolve a proxy route for the selected model.");
-        return 1;
-      }
-      const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
-      if (dryRun) {
-        const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? "(unknown)";
-        console.log("");
-        console.log(pc6.bold(pc6.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
-        console.log("");
-        console.log(`  ${pc6.bold("Provider:")}      ${provider.name}`);
-        console.log(`  ${pc6.bold("Starting model:")} ${selectedModel.id}`);
-        console.log(`  ${pc6.bold("Endpoint:")}      ${endpoint}`);
-        console.log(`  ${pc6.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
-        catalogRoutes.forEach((r) => console.log(`    ${pc6.dim(r.displayName)}`));
-        console.log("");
-        console.log(pc6.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
-        console.log("");
-        return 0;
-      }
-      return launchClaudeViaCatalog(
-        catalogRoutes,
-        startingRoute,
-        selectedModel.contextWindow,
-        trace,
-        claudeArgs
+    const { routes: catalogRoutes, droppedFavorites } = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    if (droppedFavorites.length > 0) {
+      p8.log.warn(
+        `Skipping ${droppedFavorites.length} favorite${droppedFavorites.length === 1 ? "" : "s"} that are no longer available in /model`
       );
     }
     if (dryRun) {
-      const formatDesc = selectedModel.modelFormat === "anthropic" ? "direct passthrough" : "via SDK adapter proxy";
-      const endpoint = selectedModel.modelFormat === "anthropic" ? selectedModel.baseUrl ?? "(unknown)" : selectedModel.npm ?? "SDK";
+      const endpoint = isZenGo ? BACKENDS[providerChoice].baseUrl : selectedModel.baseUrl ?? selectedModel.completionsUrl ?? "(unknown)";
       console.log("");
-      console.log(pc6.bold(pc6.cyan("  DRY RUN \u2014 would execute:")));
+      console.log(pc6.bold(pc6.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
       console.log("");
-      console.log(`  ${pc6.bold("Provider:")}  ${provider.name}`);
-      console.log(`  ${pc6.bold("Model:")}     ${selectedModel.id}`);
-      console.log(`  ${pc6.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
-      console.log(`  ${pc6.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
-      console.log(`  ${pc6.bold("Key:")}       ${provider.id} provider key`);
+      console.log(`  ${pc6.bold("Provider:")}      ${activeProvider.name}`);
+      console.log(`  ${pc6.bold("Starting model:")} ${selectedModel.id}`);
+      console.log(`  ${pc6.bold("Endpoint:")}      ${endpoint}`);
+      console.log(`  ${pc6.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
+      catalogRoutes.forEach((r) => console.log(`    ${pc6.dim(r.displayName)}`));
       console.log("");
       console.log(pc6.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
       console.log("");
       return 0;
     }
-    let proxyHandle2 = null;
-    let childEnv2;
-    if (selectedModel.modelFormat === "anthropic") {
-      childEnv2 = buildChildEnv(
-        selectedModel.baseUrl,
-        selectedModel.id,
-        provider.apiKey,
-        void 0,
-        selectedModel.contextWindow
+    return launchClaudeViaCatalog(
+      catalogRoutes,
+      startingRoute,
+      selectedModel.contextWindow,
+      trace,
+      claudeArgs
+    );
+  }
+  if (dryRun) {
+    if (isZenGo && zenGoModelInfo) {
+      const backend = BACKENDS[zenGoModelInfo.sourceBackend];
+      printDryRun(
+        backend.name,
+        zenGoModelInfo.id,
+        backend.baseUrl,
+        zenGoModelInfo.modelFormat,
+        claudeArgs,
+        conflicts,
+        zenGoModelInfo.modelFormat !== "openai",
+        zenGoModelInfo.modelFormat === "openai" ? "@ai-sdk/openai-compatible" : void 0
       );
-    } else {
+      return 0;
+    }
+    const formatDesc = selectedModel.modelFormat === "anthropic" ? "direct passthrough" : "via SDK adapter proxy";
+    const endpoint = selectedModel.modelFormat === "anthropic" ? selectedModel.baseUrl ?? "(unknown)" : selectedModel.npm ?? "SDK";
+    console.log("");
+    console.log(pc6.bold(pc6.cyan("  DRY RUN \u2014 would execute:")));
+    console.log("");
+    console.log(`  ${pc6.bold("Provider:")}  ${activeProvider.name}`);
+    console.log(`  ${pc6.bold("Model:")}     ${selectedModel.id}`);
+    console.log(`  ${pc6.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
+    console.log(`  ${pc6.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
+    console.log(`  ${pc6.bold("Key:")}       ${activeProvider.name} provider key`);
+    console.log("");
+    console.log(pc6.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+    console.log("");
+    return 0;
+  }
+  if (isZenGo && zenGoModelInfo) {
+    const backend = BACKENDS[zenGoModelInfo.sourceBackend];
+    const disableExperimentalBetas = zenGoModelInfo.modelFormat !== "openai";
+    let proxyHandle2 = null;
+    if (zenGoModelInfo.modelFormat === "openai") {
       try {
         proxyHandle2 = await startProxy(
-          selectedModel.completionsUrl ?? "",
-          selectedModel.id,
+          `${backend.baseUrl}/v1/chat/completions`,
+          zenGoModelInfo.id,
           trace,
-          selectedModel.contextWindow,
-          {
-            npm: selectedModel.npm,
-            baseURL: selectedModel.apiBaseUrl,
-            upstreamModelId: selectedModel.upstreamModelId
-          }
+          zenGoModelInfo.contextWindow,
+          { npm: "@ai-sdk/openai-compatible", baseURL: `${backend.baseUrl}/v1` }
         );
-        p8.log.info(
-          `SDK adapter proxy started on port ${proxyHandle2.port}` + (selectedModel.npm ? pc6.dim(` (${selectedModel.npm})`) : "")
-        );
+        p8.log.info(`Translation proxy started on port ${proxyHandle2.port}`);
       } catch (err) {
-        p8.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
+        p8.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
         return 1;
       }
-      childEnv2 = buildChildEnv(
-        `http://127.0.0.1:${proxyHandle2.port}`,
-        selectedModel.id,
-        provider.apiKey,
-        proxyHandle2.port,
-        selectedModel.contextWindow
-      );
     }
-    if (selectedModel.modelFormat === "anthropic") {
+    const childEnv2 = buildChildEnv(
+      backend.baseUrl,
+      zenGoModelInfo.id,
+      activeProvider.apiKey,
+      proxyHandle2?.port,
+      zenGoModelInfo.contextWindow
+    );
+    if (disableExperimentalBetas) {
       childEnv2["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1";
     }
     const debugLogPath2 = join8(tmpdir2(), "relay-ai-debug.log");
     const traceArgs2 = trace ? ["--debug-file", debugLogPath2] : [];
     if (trace) p8.log.info(`Debug log: ${debugLogPath2}`);
-    const exitCode2 = await launchClaude(childEnv2, selectedModel.id, [...traceArgs2, ...claudeArgs]);
+    const exitCode2 = await launchClaude(childEnv2, zenGoModelInfo.id, [...traceArgs2, ...claudeArgs]);
     proxyHandle2?.close();
     if (trace) printTraceLog(debugLogPath2);
     return exitCode2;
   }
-  const apiKey = earlyEffectiveKey ?? await resolveOrCollectApiKey(dryRun, trace);
-  if (!apiKey && !dryRun) return 1;
-  const effectiveKey = apiKey ?? "dry-run-placeholder";
-  let tier = dryRun ? null : getSubscriptionTier();
-  if (!tier || setup) {
-    tier = await askSubscriptionTier();
-    if (!tier) return 1;
-    if (!dryRun) setSubscriptionTier(tier);
-  }
-  const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
-  const needsGo = tier === "go" || tier === "both";
-  const spinner5 = p8.spinner();
-  spinner5.start("Fetching available models...");
-  let zenModels = earlyZenModels;
-  let goModels = earlyGoModels;
-  const fetchZen = needsZen && zenModels.length === 0;
-  const fetchGo = needsGo && goModels.length === 0;
-  try {
-    if (fetchZen || fetchGo) {
-      const backends = [];
-      if (fetchZen) backends.push("zen");
-      if (fetchGo) backends.push("go");
-      const fetched = await fetchZenGoModels(backends, !dryRun);
-      if (fetchZen) zenModels = fetched.zenModels;
-      if (fetchGo) goModels = fetched.goModels;
-    }
-    spinner5.stop(`Loaded ${zenModels.length + goModels.length} models`);
-  } catch (err) {
-    spinner5.stop(pc6.red("Failed to load models"));
-    console.error(pc6.red(String(err instanceof Error ? err.message : err)));
-    return 1;
-  }
-  const selection = await runWizard(prefs, { zen: zenModels, go: goModels }, conflicts, tier);
-  if (!selection) return 0;
-  if (!dryRun) savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id, lastProvider: "opencode" });
-  if (switchMenuActive && !dryRun) {
-    const resolveRoute = makeRouteResolver(localProviders, earlyZenModels, earlyGoModels, effectiveKey);
-    const startingRoute = zenGoModelToRoute(selection.model, effectiveKey);
-    if (!startingRoute) {
-      p8.log.error("Could not resolve a proxy route for the selected model.");
-      return 1;
-    }
-    const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
-    return launchClaudeViaCatalog(
-      catalogRoutes,
-      startingRoute,
-      selection.model.contextWindow,
-      trace,
-      claudeArgs
-    );
-  }
-  const disableExperimentalBetas = selection.model.modelFormat !== "openai";
-  if (dryRun) {
-    printDryRun(
-      selection.backend.name,
-      selection.model.id,
-      selection.backend.baseUrl,
-      selection.model.modelFormat,
-      claudeArgs,
-      conflicts,
-      disableExperimentalBetas,
-      selection.model.modelFormat === "openai" ? "@ai-sdk/openai-compatible" : void 0
-    );
-    return 0;
-  }
   let proxyHandle = null;
-  if (selection.model.modelFormat === "openai") {
+  let childEnv;
+  if (selectedModel.modelFormat === "anthropic") {
+    childEnv = buildChildEnv(
+      selectedModel.baseUrl,
+      selectedModel.id,
+      activeProvider.apiKey,
+      void 0,
+      selectedModel.contextWindow
+    );
+  } else {
     try {
       proxyHandle = await startProxy(
-        `${selection.backend.baseUrl}/v1/chat/completions`,
-        selection.model.id,
+        selectedModel.completionsUrl ?? "",
+        selectedModel.id,
         trace,
-        selection.model.contextWindow,
-        { npm: "@ai-sdk/openai-compatible", baseURL: `${selection.backend.baseUrl}/v1` }
+        selectedModel.contextWindow,
+        {
+          npm: selectedModel.npm,
+          baseURL: selectedModel.apiBaseUrl,
+          upstreamModelId: selectedModel.upstreamModelId
+        }
       );
       p8.log.info(
-        `Translation proxy started on port ${proxyHandle.port} ` + pc6.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`)
+        `SDK adapter proxy started on port ${proxyHandle.port}` + (selectedModel.npm ? pc6.dim(` (${selectedModel.npm})`) : "")
       );
     } catch (err) {
-      p8.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
+      p8.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
+    childEnv = buildChildEnv(
+      `http://127.0.0.1:${proxyHandle.port}`,
+      selectedModel.id,
+      activeProvider.apiKey,
+      proxyHandle.port,
+      selectedModel.contextWindow
+    );
   }
-  const childEnv = buildChildEnv(
-    selection.backend.baseUrl,
-    selection.model.id,
-    effectiveKey,
-    proxyHandle?.port,
-    selection.model.contextWindow
-  );
-  if (disableExperimentalBetas) {
+  if (selectedModel.modelFormat === "anthropic") {
     childEnv["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] = "1";
   }
   const debugLogPath = join8(tmpdir2(), "relay-ai-debug.log");
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
-  if (trace) {
-    p8.log.info(`Debug log: ${debugLogPath}`);
-  }
-  const exitCode = await launchClaude(childEnv, selection.model.id, [...traceArgs, ...claudeArgs]);
-  if (proxyHandle) {
-    proxyHandle.close();
-  }
+  if (trace) p8.log.info(`Debug log: ${debugLogPath}`);
+  const exitCode = await launchClaude(childEnv, selectedModel.id, [...traceArgs, ...claudeArgs]);
+  proxyHandle?.close();
   if (trace) printTraceLog(debugLogPath);
   return exitCode;
 }

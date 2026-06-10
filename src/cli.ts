@@ -20,9 +20,9 @@ import {
 } from './catalog.js';
 import { runServerCommand } from './server/index.js';
 import type { ModelFormat } from './types.js';
-import { loadPreferences, savePreferences, getSubscriptionTier, setSubscriptionTier } from './config.js';
-import { runWizard, askSubscriptionTier, pickLocalModel, browseAllModels } from './prompts.js';
-import { fetchProviderCatalog, fetchZenGoModels, providersForPicker, resolveLocalProviders } from './provider-catalog.js';
+import { loadPreferences, savePreferences } from './config.js';
+import { pickLocalModel, browseAllModels } from './prompts.js';
+import { fetchProviderCatalog, fetchZenGoModels, providersForPicker } from './provider-catalog.js';
 import { BACKENDS, VERSION } from './constants.js';
 import type { ParsedArgs, ModelInfo, FavoriteModel } from './types.js';
 import { addFavorite, removeFavorite } from './favorites.js';
@@ -498,6 +498,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   p.intro(pc.bold('  Relay AI'));
 
+  if (setup && !dryRun) {
+    p.log.info('Provider setup now lives in relay-ai providers — opening that next is recommended.');
+  }
+
   if (!dryRun && await needsFirstRunSetup()) {
     const firstRun = await runFirstRunWizard(trace);
     if (firstRun === 'cancel') return 0;
@@ -531,169 +535,195 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     }
   }
 
-  const providerSpinner = p.spinner();
-  providerSpinner.start('Loading your providers...');
-  const resolvedLocal = await resolveLocalProviders();
-  const localProviders = resolvedLocal.length > 0 ? resolvedLocal : null;
-  providerSpinner.stop('');
+  const catalogSpinner = p.spinner();
+  catalogSpinner.start('Loading your providers...');
+  let catalog: Awaited<ReturnType<typeof fetchProviderCatalog>>;
+  try {
+    catalog = await fetchProviderCatalog({ persistCache: !dryRun });
+  } catch (err) {
+    catalogSpinner.stop('');
+    console.error(pc.red(String(err instanceof Error ? err.message : err)));
+    return 1;
+  }
+  catalogSpinner.stop('');
 
-  if (!localProviders) {
-    p.log.info(pc.dim('Tip: Add providers with relay-ai providers'));
+  const allProviders = providersForPicker(catalog);
+  if (allProviders.length === 0) {
+    p.log.warn('No providers available.');
+    p.log.info(pc.dim('Run relay-ai providers add or import to get started.'));
+    return 0;
   }
 
-  let providerChoice: string = 'opencode';
-  if (localProviders !== null && localProviders.length > 0) {
-    const providerOptions: Array<{ value: string; label: string; hint: string }> = [
-      { value: 'opencode', label: 'OpenCode (Zen / Go)', hint: 'Cloud API — requires OpenCode subscription' },
-      ...localProviders.map(lp => ({
-        value: lp.id,
-        label: lp.name,
-        hint: `${lp.models.length} model${lp.models.length !== 1 ? 's' : ''} available`,
-      })),
-    ];
+  const migrateLastProvider = (id?: string) => (id === 'opencode' ? 'zen' : id);
 
-    const initialProvider =
-      prefs.lastProvider && providerOptions.some(o => o.value === prefs.lastProvider)
-        ? prefs.lastProvider
-        : 'opencode';
+  const providerOptions = allProviders.map(lp => ({
+    value: lp.id,
+    label: lp.name,
+    hint: `${lp.models.length} model${lp.models.length !== 1 ? 's' : ''} available`,
+  }));
 
-    const chosen = await p.select<string>({
-      message: 'Which provider?',
-      options: providerOptions,
-      initialValue: initialProvider,
+  const migratedLast = migrateLastProvider(prefs.lastProvider);
+  const initialProvider =
+    migratedLast && providerOptions.some(o => o.value === migratedLast)
+      ? migratedLast
+      : providerOptions[0]!.value;
+
+  const chosen = await p.select<string>({
+    message: 'Which provider?',
+    options: providerOptions,
+    initialValue: initialProvider,
+  });
+
+  if (p.isCancel(chosen)) {
+    p.cancel('Cancelled.');
+    return 0;
+  }
+
+  const providerChoice = chosen as string;
+  let activeProvider = allProviders.find(lp => lp.id === providerChoice)!;
+  const isZenGo = providerChoice === 'zen' || providerChoice === 'go';
+
+  let zenGoApiKey = earlyEffectiveKey;
+  if (isZenGo && !dryRun) {
+    zenGoApiKey = zenGoApiKey ?? await resolveOrCollectApiKey(false, trace);
+    if (!zenGoApiKey) return 0;
+    activeProvider = { ...activeProvider, apiKey: zenGoApiKey };
+  }
+
+  const selectedModel = await pickLocalModel(activeProvider, conflicts, prefs);
+  if (!selectedModel) return 0;
+
+  if (!dryRun) {
+    const prevRecent = prefs.recentModelsByProvider?.[activeProvider.id] ?? [];
+    const updatedRecent = [selectedModel.id, ...prevRecent.filter(id => id !== selectedModel.id)].slice(0, 3);
+    savePreferences({
+      lastProvider: activeProvider.id,
+      lastModel: selectedModel.id,
+      recentModelsByProvider: { ...prefs.recentModelsByProvider, [activeProvider.id]: updatedRecent },
     });
-
-    if (p.isCancel(chosen)) {
-      p.cancel('Cancelled.');
-      return 0;
-    }
-
-    providerChoice = chosen as string;
   }
 
-  // ── Local provider branch ──
-  if (providerChoice !== 'opencode') {
-    const provider = localProviders!.find(lp => lp.id === providerChoice)!;
+  const localProviders = catalog.localProviders.length > 0 ? catalog.localProviders : null;
+  const effectiveZenGoKey = isZenGo ? (zenGoApiKey ?? 'dry-run-placeholder') : zenGoApiKey;
 
-    // Model selection — same picker for both single and switch-menu paths
-    const selectedModel = await pickLocalModel(provider, conflicts, prefs);
-    if (!selectedModel) return 0;
+  const zenGoModelInfo = isZenGo
+    ? (providerChoice === 'zen' ? catalog.zenModels : catalog.goModels).find(m => m.id === selectedModel.id)
+    : undefined;
 
-    // Update recents (shared across both paths)
-    if (!dryRun) {
-      const prevRecent = prefs.recentModelsByProvider?.[provider.id] ?? [];
-      const updatedRecent = [selectedModel.id, ...prevRecent.filter(id => id !== selectedModel.id)].slice(0, 3);
-      savePreferences({
-        lastProvider: provider.id,
-        lastModel: selectedModel.id,
-        recentModelsByProvider: { ...prefs.recentModelsByProvider, [provider.id]: updatedRecent },
-      });
+  if (switchMenuActive) {
+    const resolveRoute = makeRouteResolver(
+      localProviders,
+      catalog.zenModels,
+      catalog.goModels,
+      effectiveZenGoKey,
+    );
+    const startingRoute = isZenGo && zenGoModelInfo
+      ? zenGoModelToRoute(zenGoModelInfo, activeProvider.apiKey)
+      : localModelToRoute(activeProvider, selectedModel);
+    if (!startingRoute) {
+      p.log.error('Could not resolve a proxy route for the selected model.');
+      return 1;
     }
-
-    if (switchMenuActive) {
-      const resolveRoute = makeRouteResolver(
-        localProviders,
-        earlyZenModels,
-        earlyGoModels,
-        earlyEffectiveKey,
-      );
-      const startingRoute = localModelToRoute(provider, selectedModel);
-      if (!startingRoute) {
-        p.log.error('Could not resolve a proxy route for the selected model.');
-        return 1;
-      }
-      const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
-
-      if (dryRun) {
-        const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? '(unknown)';
-        console.log('');
-        console.log(pc.bold(pc.cyan('  DRY RUN — would execute (switch-menu mode):')));
-        console.log('');
-        console.log(`  ${pc.bold('Provider:')}      ${provider.name}`);
-        console.log(`  ${pc.bold('Starting model:')} ${selectedModel.id}`);
-        console.log(`  ${pc.bold('Endpoint:')}      ${endpoint}`);
-        console.log(`  ${pc.bold('/model catalog:')} ${catalogRoutes.length} model(s)`);
-        catalogRoutes.forEach(r => console.log(`    ${pc.dim(r.displayName)}`));
-        console.log('');
-        console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
-        console.log('');
-        return 0;
-      }
-
-      return launchClaudeViaCatalog(
-        catalogRoutes,
-        startingRoute,
-        selectedModel.contextWindow,
-        trace,
-        claudeArgs,
+    const { routes: catalogRoutes, droppedFavorites } = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    if (droppedFavorites.length > 0) {
+      p.log.warn(
+        `Skipping ${droppedFavorites.length} favorite${droppedFavorites.length === 1 ? '' : 's'} `
+        + 'that are no longer available in /model',
       );
     }
-
-    // ── Single-model path (no favorites) ──
 
     if (dryRun) {
-      const formatDesc = selectedModel.modelFormat === 'anthropic'
-        ? 'direct passthrough'
-        : 'via SDK adapter proxy';
-      const endpoint = selectedModel.modelFormat === 'anthropic'
-        ? (selectedModel.baseUrl ?? '(unknown)')
-        : (selectedModel.npm ?? 'SDK');
+      const endpoint = isZenGo
+        ? BACKENDS[providerChoice as 'zen' | 'go'].baseUrl
+        : (selectedModel.baseUrl ?? selectedModel.completionsUrl ?? '(unknown)');
       console.log('');
-      console.log(pc.bold(pc.cyan('  DRY RUN — would execute:')));
+      console.log(pc.bold(pc.cyan('  DRY RUN — would execute (switch-menu mode):')));
       console.log('');
-      console.log(`  ${pc.bold('Provider:')}  ${provider.name}`);
-      console.log(`  ${pc.bold('Model:')}     ${selectedModel.id}`);
-      console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${formatDesc})`);
-      console.log(`  ${pc.bold(selectedModel.modelFormat === 'anthropic' ? 'Endpoint:' : 'SDK npm:')} ${endpoint}`);
-      console.log(`  ${pc.bold('Key:')}       ${provider.id} provider key`);
+      console.log(`  ${pc.bold('Provider:')}      ${activeProvider.name}`);
+      console.log(`  ${pc.bold('Starting model:')} ${selectedModel.id}`);
+      console.log(`  ${pc.bold('Endpoint:')}      ${endpoint}`);
+      console.log(`  ${pc.bold('/model catalog:')} ${catalogRoutes.length} model(s)`);
+      catalogRoutes.forEach(r => console.log(`    ${pc.dim(r.displayName)}`));
       console.log('');
       console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
       console.log('');
       return 0;
     }
 
-    let proxyHandle: ProxyHandle | null = null;
-    let childEnv: NodeJS.ProcessEnv;
+    return launchClaudeViaCatalog(
+      catalogRoutes,
+      startingRoute,
+      selectedModel.contextWindow,
+      trace,
+      claudeArgs,
+    );
+  }
 
-    if (selectedModel.modelFormat === 'anthropic') {
-      childEnv = buildChildEnv(
-        selectedModel.baseUrl!,
-        selectedModel.id,
-        provider.apiKey,
-        undefined,
-        selectedModel.contextWindow,
+  // ── Single-model path ──
+
+  if (dryRun) {
+    if (isZenGo && zenGoModelInfo) {
+      const backend = BACKENDS[zenGoModelInfo.sourceBackend];
+      printDryRun(
+        backend.name,
+        zenGoModelInfo.id,
+        backend.baseUrl,
+        zenGoModelInfo.modelFormat,
+        claudeArgs,
+        conflicts,
+        zenGoModelInfo.modelFormat !== 'openai',
+        zenGoModelInfo.modelFormat === 'openai' ? '@ai-sdk/openai-compatible' : undefined,
       );
-    } else {
+      return 0;
+    }
+    const formatDesc = selectedModel.modelFormat === 'anthropic'
+      ? 'direct passthrough'
+      : 'via SDK adapter proxy';
+    const endpoint = selectedModel.modelFormat === 'anthropic'
+      ? (selectedModel.baseUrl ?? '(unknown)')
+      : (selectedModel.npm ?? 'SDK');
+    console.log('');
+    console.log(pc.bold(pc.cyan('  DRY RUN — would execute:')));
+    console.log('');
+    console.log(`  ${pc.bold('Provider:')}  ${activeProvider.name}`);
+    console.log(`  ${pc.bold('Model:')}     ${selectedModel.id}`);
+    console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${formatDesc})`);
+    console.log(`  ${pc.bold(selectedModel.modelFormat === 'anthropic' ? 'Endpoint:' : 'SDK npm:')} ${endpoint}`);
+    console.log(`  ${pc.bold('Key:')}       ${activeProvider.name} provider key`);
+    console.log('');
+    console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
+    console.log('');
+    return 0;
+  }
+
+  if (isZenGo && zenGoModelInfo) {
+    const backend = BACKENDS[zenGoModelInfo.sourceBackend];
+    const disableExperimentalBetas = zenGoModelInfo.modelFormat !== 'openai';
+    let proxyHandle: ProxyHandle | null = null;
+    if (zenGoModelInfo.modelFormat === 'openai') {
       try {
         proxyHandle = await startProxy(
-          selectedModel.completionsUrl ?? '',
-          selectedModel.id,
+          `${backend.baseUrl}/v1/chat/completions`,
+          zenGoModelInfo.id,
           trace,
-          selectedModel.contextWindow,
-          {
-            npm: selectedModel.npm,
-            baseURL: selectedModel.apiBaseUrl,
-            upstreamModelId: selectedModel.upstreamModelId,
-          },
+          zenGoModelInfo.contextWindow,
+          { npm: '@ai-sdk/openai-compatible', baseURL: `${backend.baseUrl}/v1` },
         );
-        p.log.info(
-          `SDK adapter proxy started on port ${proxyHandle.port}` +
-          (selectedModel.npm ? pc.dim(` (${selectedModel.npm})`) : ''),
-        );
+        p.log.info(`Translation proxy started on port ${proxyHandle.port}`);
       } catch (err) {
-        p.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
+        p.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
         return 1;
       }
-      childEnv = buildChildEnv(
-        `http://127.0.0.1:${proxyHandle.port}`,
-        selectedModel.id,
-        provider.apiKey,
-        proxyHandle.port,
-        selectedModel.contextWindow,
-      );
     }
 
-    if (selectedModel.modelFormat === 'anthropic') {
+    const childEnv = buildChildEnv(
+      backend.baseUrl,
+      zenGoModelInfo.id,
+      activeProvider.apiKey,
+      proxyHandle?.port,
+      zenGoModelInfo.contextWindow,
+    );
+    if (disableExperimentalBetas) {
       childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
     }
 
@@ -701,149 +731,64 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
     if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 
-    const exitCode = await launchClaude(childEnv, selectedModel.id, [...traceArgs, ...claudeArgs]);
+    const exitCode = await launchClaude(childEnv, zenGoModelInfo.id, [...traceArgs, ...claudeArgs]);
     proxyHandle?.close();
     if (trace) printTraceLog(debugLogPath);
     return exitCode;
   }
 
-  // ── OpenCode cloud branch ──
-
-  // When earlyEffectiveKey was already resolved (because of Zen/Go favorites), reuse it;
-  // otherwise run the normal key resolution now.
-  const apiKey = earlyEffectiveKey ?? await resolveOrCollectApiKey(dryRun, trace);
-  if (!apiKey && !dryRun) return 1;
-  const effectiveKey = apiKey ?? 'dry-run-placeholder';
-
-  // Subscription tier: ignored in dry-run so the user sees the question fresh
-  let tier = dryRun ? null : getSubscriptionTier();
-  if (!tier || setup) {
-    tier = await askSubscriptionTier();
-    if (!tier) return 1;
-    if (!dryRun) setSubscriptionTier(tier);  // don't persist in dry-run
-  }
-
-  // Determine which backends to pre-fetch based on tier
-  const needsZen = tier === 'free' || tier === 'zen' || tier === 'go' || tier === 'both';
-  const needsGo = tier === 'go' || tier === 'both';
-
-  const spinner = p.spinner();
-  spinner.start('Fetching available models...');
-
-  let zenModels: ModelInfo[] = earlyZenModels;
-  let goModels: ModelInfo[] = earlyGoModels;
-  const fetchZen = needsZen && zenModels.length === 0;
-  const fetchGo = needsGo && goModels.length === 0;
-
-  try {
-    if (fetchZen || fetchGo) {
-      const backends: Array<'zen' | 'go'> = [];
-      if (fetchZen) backends.push('zen');
-      if (fetchGo) backends.push('go');
-      const fetched = await fetchZenGoModels(backends, !dryRun);
-      if (fetchZen) zenModels = fetched.zenModels;
-      if (fetchGo) goModels = fetched.goModels;
-    }
-    spinner.stop(`Loaded ${zenModels.length + goModels.length} models`);
-  } catch (err) {
-    spinner.stop(pc.red('Failed to load models'));
-    console.error(pc.red(String(err instanceof Error ? err.message : err)));
-    return 1;
-  }
-
-  // Run interactive wizard
-  const selection = await runWizard(prefs, { zen: zenModels, go: goModels }, conflicts, tier);
-  if (!selection) return 0;
-
-  // Persist choices for next run (skipped in dry-run)
-  if (!dryRun) savePreferences({ lastBackend: selection.backend.id, lastModel: selection.model.id, lastProvider: 'opencode' });
-
-  // ── Cloud switch-menu path ── when Zen/Go favorites exist, build a catalog proxy
-  if (switchMenuActive && !dryRun) {
-    const resolveRoute = makeRouteResolver(localProviders, earlyZenModels, earlyGoModels, effectiveKey);
-    const startingRoute = zenGoModelToRoute(selection.model, effectiveKey);
-    if (!startingRoute) {
-      p.log.error('Could not resolve a proxy route for the selected model.');
-      return 1;
-    }
-    const catalogRoutes = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
-    return launchClaudeViaCatalog(
-      catalogRoutes,
-      startingRoute,
-      selection.model.contextWindow,
-      trace,
-      claudeArgs,
-    );
-  }
-
-  // ── Cloud single-model path ──
-
-  // Disable experimental betas only for direct (non-proxy) upstream routes — OpenCode
-  // Zen/Go may reject beta headers. Local proxy preserves defer_loading for tool search.
-  const disableExperimentalBetas = selection.model.modelFormat !== 'openai';
-
-  if (dryRun) {
-    printDryRun(
-      selection.backend.name,
-      selection.model.id,
-      selection.backend.baseUrl,
-      selection.model.modelFormat,
-      claudeArgs,
-      conflicts,
-      disableExperimentalBetas,
-      selection.model.modelFormat === 'openai' ? '@ai-sdk/openai-compatible' : undefined,
-    );
-    return 0;
-  }
-
-  // Start translation proxy for models that use OpenAI chat completions format
   let proxyHandle: ProxyHandle | null = null;
-  if (selection.model.modelFormat === 'openai') {
+  let childEnv: NodeJS.ProcessEnv;
+
+  if (selectedModel.modelFormat === 'anthropic') {
+    childEnv = buildChildEnv(
+      selectedModel.baseUrl!,
+      selectedModel.id,
+      activeProvider.apiKey,
+      undefined,
+      selectedModel.contextWindow,
+    );
+  } else {
     try {
       proxyHandle = await startProxy(
-        `${selection.backend.baseUrl}/v1/chat/completions`,
-        selection.model.id,
+        selectedModel.completionsUrl ?? '',
+        selectedModel.id,
         trace,
-        selection.model.contextWindow,
-        { npm: '@ai-sdk/openai-compatible', baseURL: `${selection.backend.baseUrl}/v1` },
+        selectedModel.contextWindow,
+        {
+          npm: selectedModel.npm,
+          baseURL: selectedModel.apiBaseUrl,
+          upstreamModelId: selectedModel.upstreamModelId,
+        },
       );
       p.log.info(
-        `Translation proxy started on port ${proxyHandle.port} ` +
-        pc.dim(`(${selection.backend.baseUrl}/v1/chat/completions)`),
+        `SDK adapter proxy started on port ${proxyHandle.port}` +
+        (selectedModel.npm ? pc.dim(` (${selectedModel.npm})`) : ''),
       );
     } catch (err) {
-      p.log.error(`Failed to start translation proxy: ${err instanceof Error ? err.message : String(err)}`);
+      p.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
+    childEnv = buildChildEnv(
+      `http://127.0.0.1:${proxyHandle.port}`,
+      selectedModel.id,
+      activeProvider.apiKey,
+      proxyHandle.port,
+      selectedModel.contextWindow,
+    );
   }
 
-  const childEnv = buildChildEnv(
-    selection.backend.baseUrl,
-    selection.model.id,
-    effectiveKey,
-    proxyHandle?.port,
-    selection.model.contextWindow,
-  );
-  if (disableExperimentalBetas) {
+  if (selectedModel.modelFormat === 'anthropic') {
     childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   }
 
-  // --trace: write Claude Code debug logs so we can see the actual API error
   const debugLogPath = join(tmpdir(), 'relay-ai-debug.log');
   const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
-  if (trace) {
-    p.log.info(`Debug log: ${debugLogPath}`);
-  }
+  if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 
-  const exitCode = await launchClaude(childEnv, selection.model.id, [...traceArgs, ...claudeArgs]);
-
-  // Stop translation proxy after Claude exits
-  if (proxyHandle) {
-    proxyHandle.close();
-  }
-
+  const exitCode = await launchClaude(childEnv, selectedModel.id, [...traceArgs, ...claudeArgs]);
+  proxyHandle?.close();
   if (trace) printTraceLog(debugLogPath);
-
   return exitCode;
 }
 

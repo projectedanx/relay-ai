@@ -17,3 +17,8 @@ export function slugifyProviderId(displayName: string): string {
   const trimmed = base.replace(/^-+|-+$/g, '');
   return isValidProviderId(trimmed) ? trimmed : `custom-${trimmed.slice(0, 40)}`;
 }
+
+export function customProviderId(displayName: string): string {
+  const slug = slugifyProviderId(displayName);
+  return slug.startsWith('custom-') ? slug : `custom-${slug}`;
+}

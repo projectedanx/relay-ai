@@ -5,7 +5,7 @@ export type {
   RegistrySubscriptionFilter,
 } from './types.js';
 export { REGISTRY_SCHEMA_VERSION } from './types.js';
-export { isValidProviderId, slugifyProviderId, PROVIDER_ID_PATTERN } from './validate.js';
+export { isValidProviderId, slugifyProviderId, customProviderId, PROVIDER_ID_PATTERN } from './validate.js';
 export { materializeRegistry, type CredentialResolver } from './materialize.js';
 export {
   ensureSecureAppHome,

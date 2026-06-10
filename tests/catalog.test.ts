@@ -24,9 +24,10 @@ describe('buildCatalogRoutes', () => {
       { providerId: 'groq', modelId: 'llama-3.3-70b' },
       { providerId: 'zen', modelId: 'claude-sonnet-4' },
     ];
-    const routes = buildCatalogRoutes(starting, favorites, resolve, MAX_MODEL_CATALOG);
+    const { routes, droppedFavorites } = buildCatalogRoutes(starting, favorites, resolve, MAX_MODEL_CATALOG);
     expect(routes[0]).toEqual(starting);
     expect(routes).toHaveLength(2);
+    expect(droppedFavorites).toEqual([{ providerId: 'zen', modelId: 'claude-sonnet-4' }]);
   });
 });
 
