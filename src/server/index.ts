@@ -8,7 +8,6 @@ import {
   getServerExposedProviders,
   getServerFavoritesOnly,
   getServerMaskGatewayIds,
-  getSubscriptionTier,
   loadPreferences,
   setSavedServerPassword,
   setServerExposedProviders,
@@ -16,8 +15,13 @@ import {
   setServerMaskGatewayIds,
 } from '../config.js';
 import { BACKENDS } from '../constants.js';
-import { fetchProviderCatalog, fetchZenGoModels, localProvidersToServerModels, zenGoModelsToServerModels } from '../provider-catalog.js';
-import { fetchLocalProviders } from '../opencode-serve.js';
+import {
+  fetchProviderCatalog,
+  localProvidersToServerModels,
+  zenGoModelsToServerModels,
+  type ProviderCatalog,
+} from '../provider-catalog.js';
+import { loadRegistry } from '../registry/io.js';
 import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo } from './models.js';
 import {
@@ -44,8 +48,6 @@ import {
   vertexModelsToServerModels,
 } from './vertex-config.js';
 
-type SubscriptionTier = 'free' | 'zen' | 'go' | 'both';
-
 export interface ServerRunConfig {
   exposedProviders: string[] | null;
   maskGatewayIds: boolean;
@@ -68,9 +70,64 @@ function getLocalIp(): string {
   return '<this-computer-ip>';
 }
 
-function modelsForTier(tier: SubscriptionTier, backendId: 'zen' | 'go', models: ModelInfo[]): ModelInfo[] {
-  if (tier === 'free') return backendId === 'zen' ? models.filter(model => model.isFree) : [];
-  if (tier === 'go') return backendId === 'zen' ? models.filter(model => model.isFree) : models;
+function filterZenModelsForServer(models: ModelInfo[]): ModelInfo[] {
+  const zenProvider = loadRegistry().providers.find(entry => entry.id === 'zen' && entry.enabled);
+  if (zenProvider?.subscriptionFilter === 'free') {
+    return models.filter(model => model.isFree);
+  }
+  return models;
+}
+
+function usableGoModels(models: ModelInfo[]): ModelInfo[] {
+  return models.filter(model => model.modelFormat !== 'unsupported');
+}
+
+function providerOptionsFromCatalog(catalog: ProviderCatalog): ServerProviderOption[] {
+  const options: ServerProviderOption[] = [];
+  const zenModels = filterZenModelsForServer(catalog.zenModels);
+  if (zenModels.length > 0) {
+    options.push({
+      id: 'zen',
+      name: 'OpenCode Zen',
+      modelCount: zenModels.length,
+    });
+  }
+  const goModels = usableGoModels(catalog.goModels);
+  if (goModels.length > 0) {
+    options.push({
+      id: 'go',
+      name: 'OpenCode Go',
+      modelCount: goModels.length,
+    });
+  }
+  for (const provider of catalog.localProviders) {
+    options.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount: provider.models.length,
+    });
+  }
+  return options;
+}
+
+async function loadServerModels(): Promise<ServerModelInfo[]> {
+  const catalog = await fetchProviderCatalog();
+  const models: ServerModelInfo[] = [];
+
+  const zenModels = filterZenModelsForServer(catalog.zenModels);
+  if (zenModels.length > 0) {
+    models.push(...zenGoModelsToServerModels(zenModels));
+  }
+
+  const goModels = usableGoModels(catalog.goModels);
+  if (goModels.length > 0) {
+    models.push(...zenGoModelsToServerModels(goModels));
+  }
+
+  if (catalog.localProviders.length > 0) {
+    models.push(...localProvidersToServerModels(catalog.localProviders));
+  }
+
   return models;
 }
 
@@ -115,75 +172,14 @@ async function getServerPasswordForMode(mode: 'local' | 'network'): Promise<stri
   return serverPassword;
 }
 
-async function loadServerModels(tier: SubscriptionTier): Promise<ServerModelInfo[]> {
-  const needsZen = tier === 'free' || tier === 'zen' || tier === 'go' || tier === 'both';
-  const needsGo = tier === 'go' || tier === 'both';
-  const models: ServerModelInfo[] = [];
-
-  const zenGoBackends: Array<'zen' | 'go'> = [];
-  if (needsZen) zenGoBackends.push('zen');
-  if (needsGo) zenGoBackends.push('go');
-
-  if (zenGoBackends.length > 0) {
-    const zenGo = await fetchZenGoModels(zenGoBackends, true);
-    if (needsZen) models.push(...zenGoModelsToServerModels(modelsForTier(tier, 'zen', zenGo.zenModels)));
-    if (needsGo) models.push(...zenGoModelsToServerModels(modelsForTier(tier, 'go', zenGo.goModels)));
-  }
-
-  try {
-    const localProviders = await fetchLocalProviders();
-    if (localProviders !== null) {
-      models.push(...localProvidersToServerModels(localProviders));
-    } else {
-      p.log.info('No local providers found — using cloud models only');
-    }
-  } catch {
-    p.log.info('No local providers found — using cloud models only');
-  }
-
-  return models;
-}
-
-function providerOptionsForTier(
-  tier: SubscriptionTier,
-  catalog: Awaited<ReturnType<typeof fetchProviderCatalog>>,
-): ServerProviderOption[] {
-  const options: ServerProviderOption[] = [];
-  const needsZen = tier === 'free' || tier === 'zen' || tier === 'go' || tier === 'both';
-  const needsGo = tier === 'go' || tier === 'both';
-
-  if (needsZen && catalog.zenModels.length > 0) {
-    options.push({
-      id: 'zen',
-      name: 'OpenCode Zen',
-      modelCount: modelsForTier(tier, 'zen', catalog.zenModels).length,
-    });
-  }
-  if (needsGo && catalog.goModels.length > 0) {
-    options.push({
-      id: 'go',
-      name: 'OpenCode Go',
-      modelCount: modelsForTier(tier, 'go', catalog.goModels).length,
-    });
-  }
-  for (const provider of catalog.localProviders) {
-    options.push({
-      id: provider.id,
-      name: provider.name,
-      modelCount: provider.models.length,
-    });
-  }
-  return options;
-}
-
-async function configureExposedProviders(tier: SubscriptionTier): Promise<string[] | null | undefined> {
+async function configureExposedProviders(): Promise<string[] | null | undefined> {
   p.log.info('Add providers to expose. Listed providers are removed when selected — like favorites.');
   const spinner = p.spinner();
   spinner.start('Loading providers...');
   const catalog = await fetchProviderCatalog();
   spinner.stop('');
 
-  const available = providerOptionsForTier(tier, catalog);
+  const available = providerOptionsFromCatalog(catalog);
   const picked = await selectServerProviders(available, getServerExposedProviders() ?? undefined);
   if (!picked) return undefined;
   setServerExposedProviders(picked);
@@ -191,7 +187,7 @@ async function configureExposedProviders(tier: SubscriptionTier): Promise<string
   return picked;
 }
 
-async function runServerWizard(tier: SubscriptionTier): Promise<ServerRunConfig | undefined> {
+async function runServerWizard(): Promise<ServerRunConfig | undefined> {
   p.intro(pc.bold('  Relay AI — Server'));
 
   const startMode = await askServerStartMode();
@@ -205,7 +201,7 @@ async function runServerWizard(tier: SubscriptionTier): Promise<ServerRunConfig 
     };
   }
 
-  const exposedProviders = await configureExposedProviders(tier);
+  const exposedProviders = await configureExposedProviders();
   if (exposedProviders === undefined) return undefined;
 
   const maskGatewayIds = await askMaskGatewayIds(getServerMaskGatewayIds());
@@ -278,37 +274,41 @@ async function runVertexServerCommand(): Promise<number> {
   return 0;
 }
 
+async function resolveServerUpstreamApiKey(): Promise<string | null> {
+  let apiKey = sanitizeCredential(resolveApiKey());
+  if (apiKey) return apiKey;
+
+  apiKey = sanitizeCredential(await readFromCredentialStore((reason) => {
+    p.log.warn(`Credential store unavailable — ${reason}`);
+  }));
+  if (apiKey) {
+    const isMac = process.platform === 'darwin';
+    const isWindows = process.platform === 'win32';
+    const storeName = isMac ? 'macOS Keychain' : isWindows ? 'Windows Credential Manager' : 'Secret Service';
+    p.log.success(`Found key in ${storeName}`);
+    return apiKey;
+  }
+
+  const catalog = await fetchProviderCatalog();
+  if (catalog.localProviders.some(provider => provider.apiKey.trim())) {
+    return 'registry-local';
+  }
+
+  return null;
+}
+
 export async function runServerCommand(options: ServerCommandOptions = {}): Promise<number> {
   if (options.vertex) {
     return runVertexServerCommand();
   }
 
-  let apiKey = resolveApiKey();
+  const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
-    apiKey = await readFromCredentialStore((reason) => {
-      p.log.warn(`Credential store unavailable — ${reason}`);
-    });
-    if (apiKey) {
-      const isMac = process.platform === 'darwin';
-      const isWindows = process.platform === 'win32';
-      const storeName = isMac ? 'macOS Keychain' : isWindows ? 'Windows Credential Manager' : 'Secret Service';
-      p.log.success(`Found key in ${storeName}`);
-    }
-  }
-
-  apiKey = sanitizeCredential(apiKey) ?? '';
-  if (!apiKey) {
-    p.log.error('Missing OPENCODE_API_KEY. Run `relay-ai claude` once to configure your key, or export OPENCODE_API_KEY.');
+    p.log.error('No providers configured. Run `relay-ai providers add` or import, or set OPENCODE_API_KEY for Zen/Go.');
     return 1;
   }
 
-  const tier = getSubscriptionTier();
-  if (!tier) {
-    p.log.error('Missing subscription tier. Run `relay-ai claude --setup` first.');
-    return 1;
-  }
-
-  const runConfig = await runServerWizard(tier);
+  const runConfig = await runServerWizard();
   if (!runConfig) return 0;
 
   const mode = await askListenMode();
@@ -323,7 +323,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
 
   let models: ServerModelInfo[];
   try {
-    models = await loadServerModels(tier);
+    models = await loadServerModels();
     if (runConfig.exposedProviders) {
       models = filterServerModelsByProviders(models, runConfig.exposedProviders);
     }
@@ -343,7 +343,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     }
     if (models.length === 0) {
       spinner.stop(pc.red('No models to expose'));
-      p.log.error('Add providers in the server wizard — Configure & start → manage exposed providers.');
+      p.log.error('Add providers with `relay-ai providers add` or configure exposed providers in the server wizard.');
       return 1;
     }
 
@@ -354,7 +354,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       : '';
     const favoritesNote = runConfig.favoritesOnly ? ' — favorites only' : '';
     const maskNote = runConfig.maskGatewayIds ? ' — discovery ids masked' : '';
-    spinner.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}${maskNote}`);
+    spinner.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p.log.info(summary);
   } catch (err) {
     spinner.stop(pc.red('Failed to load models'));

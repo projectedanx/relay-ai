@@ -96,7 +96,6 @@ var CONFLICTING_ENV_VARS = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL"
 ];
 var OPENCODE_CACHE_PATH = join2(homedir2(), ".cache", "opencode", "models.json");
-var MODELS_CACHE_TTL_MS = 60 * 60 * 1e3;
 var MAX_MODEL_CATALOG = 20;
 var VERTEX_ANTHROPIC_NPM = "@ai-sdk/google-vertex/anthropic";
 var BLACKLISTED_LOCAL_MODEL_IDS = /* @__PURE__ */ new Set([
@@ -719,152 +718,11 @@ export OPENCODE_API_KEY='${escapedKey}'
 import pc2 from "picocolors";
 import * as p2 from "@clack/prompts";
 
-// src/config.ts
-import { dirname, join as join5 } from "path";
-import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync4, renameSync, writeFileSync as writeFileSync2 } from "fs";
-function readJsonFile(path) {
-  try {
-    const parsed = JSON.parse(readFileSync4(path, "utf8"));
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-function ensureAppHomeMigrated() {
-  const configPath = getConfigPath();
-  if (existsSync4(configPath)) return;
-  const legacyConfig = join5(getLegacyAppHome(), "config.json");
-  if (!existsSync4(legacyConfig)) return;
-  mkdirSync2(getAppHome(), { recursive: true });
-  copyFileSync(legacyConfig, configPath);
-  const legacyVertex = join5(getLegacyAppHome(), "vertex-models.json");
-  const vertexPath = join5(getAppHome(), "vertex-models.json");
-  if (existsSync4(legacyVertex) && !existsSync4(vertexPath)) {
-    copyFileSync(legacyVertex, vertexPath);
-  }
-}
-function ensureConfigMigrated() {
-  ensureAppHomeMigrated();
-  const configPath = getConfigPath();
-  if (existsSync4(configPath)) return;
-  const legacyPath = getLegacyConfPath();
-  if (!existsSync4(legacyPath)) return;
-  const legacy = readJsonFile(legacyPath);
-  if (!legacy) return;
-  mkdirSync2(dirname(configPath), { recursive: true });
-  writeFileSync2(configPath, `${JSON.stringify(legacy, null, 2)}
-`, "utf8");
-  try {
-    renameSync(legacyPath, `${legacyPath}.migrated`);
-  } catch {
-  }
-}
-function readConfig() {
-  ensureConfigMigrated();
-  return readJsonFile(getConfigPath()) ?? {};
-}
-function writeConfig(config) {
-  const configPath = getConfigPath();
-  mkdirSync2(dirname(configPath), { recursive: true });
-  writeFileSync2(configPath, `${JSON.stringify(config, null, 2)}
-`, "utf8");
-}
-function loadPreferences() {
-  const config = readConfig();
-  const lastProvider = config.lastProvider === "opencode" ? "zen" : config.lastProvider;
-  return {
-    lastBackend: config.lastBackend,
-    lastModel: config.lastModel,
-    lastProvider,
-    recentModelsByProvider: config.recentModelsByProvider,
-    favoriteModels: config.favoriteModels,
-    server: config.server
-  };
-}
-function savePreferences(prefs) {
-  const config = readConfig();
-  if (prefs.lastBackend !== void 0) config.lastBackend = prefs.lastBackend;
-  if (prefs.lastModel !== void 0) config.lastModel = prefs.lastModel;
-  if (prefs.lastProvider !== void 0) config.lastProvider = prefs.lastProvider;
-  if (prefs.recentModelsByProvider !== void 0) config.recentModelsByProvider = prefs.recentModelsByProvider;
-  if (prefs.favoriteModels !== void 0) config.favoriteModels = prefs.favoriteModels;
-  writeConfig(config);
-}
-function getCachedModels(backendId) {
-  const modelListCache = readConfig().modelListCache;
-  const entry = modelListCache?.[backendId];
-  if (!entry) return null;
-  const age = Date.now() - new Date(entry.fetchedAt).getTime();
-  if (age > MODELS_CACHE_TTL_MS) return null;
-  return entry.models;
-}
-function setCachedModels(backendId, models) {
-  const config = readConfig();
-  config.modelListCache = {
-    ...config.modelListCache ?? {},
-    [backendId]: { models, fetchedAt: (/* @__PURE__ */ new Date()).toISOString() }
-  };
-  writeConfig(config);
-}
-function getSubscriptionTier() {
-  return readConfig().subscriptionTier ?? null;
-}
-function setSubscriptionTier(tier) {
-  const config = readConfig();
-  config.subscriptionTier = tier;
-  writeConfig(config);
-}
-function getSavedServerPassword() {
-  return readConfig().server?.savedPassword?.trim() || null;
-}
-function setSavedServerPassword(password3) {
-  const config = readConfig();
-  config.server = {
-    ...config.server ?? {},
-    savedPassword: password3
-  };
-  writeConfig(config);
-}
-function getServerExposedProviders() {
-  const list = readConfig().server?.exposedProviders;
-  return list && list.length > 0 ? list : null;
-}
-function setServerExposedProviders(providerIds) {
-  const config = readConfig();
-  config.server = {
-    ...config.server ?? {},
-    exposedProviders: providerIds
-  };
-  writeConfig(config);
-}
-function getServerMaskGatewayIds() {
-  return readConfig().server?.maskGatewayIds ?? true;
-}
-function setServerMaskGatewayIds(mask) {
-  const config = readConfig();
-  config.server = {
-    ...config.server ?? {},
-    maskGatewayIds: mask
-  };
-  writeConfig(config);
-}
-function getServerFavoritesOnly() {
-  return readConfig().server?.favoritesOnly ?? false;
-}
-function setServerFavoritesOnly(favoritesOnly) {
-  const config = readConfig();
-  config.server = {
-    ...config.server ?? {},
-    favoritesOnly
-  };
-  writeConfig(config);
-}
-
 // src/opencode-serve.ts
 import { execSync as execSync2, spawn as spawn2 } from "child_process";
-import { existsSync as existsSync5 } from "fs";
+import { existsSync as existsSync4 } from "fs";
 import { homedir as homedir5 } from "os";
-import { join as join6 } from "path";
+import { join as join5 } from "path";
 
 // src/models.ts
 var BRAND_MAP = [
@@ -1017,13 +875,13 @@ function normalizeProviders(raw) {
 // src/opencode-serve.ts
 var isWindows2 = process.platform === "win32";
 var OPENCODE_FALLBACK_PATHS = isWindows2 ? [
-  join6(process.env["APPDATA"] ?? homedir5(), "npm", "opencode.cmd"),
-  join6(process.env["APPDATA"] ?? homedir5(), "npm", "opencode"),
-  join6(homedir5(), "AppData", "Roaming", "npm", "opencode.cmd")
+  join5(process.env["APPDATA"] ?? homedir5(), "npm", "opencode.cmd"),
+  join5(process.env["APPDATA"] ?? homedir5(), "npm", "opencode"),
+  join5(homedir5(), "AppData", "Roaming", "npm", "opencode.cmd")
 ] : [
-  join6(homedir5(), ".opencode", "bin", "opencode"),
-  join6(homedir5(), ".local", "bin", "opencode"),
-  join6(homedir5(), ".npm", "bin", "opencode"),
+  join5(homedir5(), ".opencode", "bin", "opencode"),
+  join5(homedir5(), ".local", "bin", "opencode"),
+  join5(homedir5(), ".npm", "bin", "opencode"),
   "/usr/local/bin/opencode",
   "/opt/homebrew/bin/opencode"
 ];
@@ -1038,7 +896,7 @@ function findOpencodeBinary() {
   } catch {
   }
   for (const path of OPENCODE_FALLBACK_PATHS) {
-    if (existsSync5(path)) return path;
+    if (existsSync4(path)) return path;
   }
   return null;
 }
@@ -1104,7 +962,7 @@ async function fetchLocalProviders() {
 }
 
 // src/registry/builtins.ts
-function zenRegistryStub() {
+function zenRegistryStub(subscriptionFilter) {
   return {
     id: "zen",
     templateId: "zen",
@@ -1112,6 +970,7 @@ function zenRegistryStub() {
     enabled: true,
     authRef: "keyring:global:opencode",
     api: {},
+    ...subscriptionFilter ? { subscriptionFilter } : {},
     addedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
@@ -1186,16 +1045,16 @@ function localProviderToRegistry(provider, templateId) {
 // src/registry/io.ts
 import {
   chmodSync as chmodSync2,
-  copyFileSync as copyFileSync2,
-  existsSync as existsSync6,
-  mkdirSync as mkdirSync3,
+  copyFileSync,
+  existsSync as existsSync5,
+  mkdirSync as mkdirSync2,
   openSync,
-  readFileSync as readFileSync5,
-  renameSync as renameSync2,
+  readFileSync as readFileSync4,
+  renameSync,
   writeSync,
   closeSync
 } from "fs";
-import { dirname as dirname2 } from "path";
+import { dirname } from "path";
 
 // src/registry/types.ts
 var REGISTRY_SCHEMA_VERSION = 1;
@@ -1205,7 +1064,7 @@ var DIR_MODE2 = 448;
 var FILE_MODE2 = 384;
 function ensureSecureAppHome() {
   const home = getAppHome();
-  mkdirSync3(home, { recursive: true, mode: DIR_MODE2 });
+  mkdirSync2(home, { recursive: true, mode: DIR_MODE2 });
   try {
     chmodSync2(home, DIR_MODE2);
   } catch {
@@ -1213,7 +1072,7 @@ function ensureSecureAppHome() {
 }
 function writeSecureFile(path, content) {
   ensureSecureAppHome();
-  mkdirSync3(dirname2(path), { recursive: true, mode: DIR_MODE2 });
+  mkdirSync2(dirname(path), { recursive: true, mode: DIR_MODE2 });
   const fd = openSync(path, "w", FILE_MODE2);
   try {
     writeSync(fd, content);
@@ -1280,11 +1139,11 @@ function parseRegistry(raw) {
   return registry;
 }
 function loadRegistry(path = getProvidersPath()) {
-  if (!existsSync6(path)) {
+  if (!existsSync5(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
   try {
-    const raw = JSON.parse(readFileSync5(path, "utf8"));
+    const raw = JSON.parse(readFileSync4(path, "utf8"));
     return parseRegistry(raw);
   } catch {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
@@ -1294,15 +1153,15 @@ function saveRegistry(registry, path = getProvidersPath()) {
   const payload = `${JSON.stringify(registry, null, 2)}
 `;
   const backup = `${path}.bak`;
-  if (existsSync6(path)) {
+  if (existsSync5(path)) {
     try {
-      copyFileSync2(path, backup);
+      copyFileSync(path, backup);
     } catch {
     }
   }
   const tmp = `${path}.tmp`;
   writeSecureFile(tmp, payload);
-  renameSync2(tmp, path);
+  renameSync(tmp, path);
 }
 
 // src/registry/fetch-template-models.ts
@@ -2133,7 +1992,7 @@ async function needsFirstRunSetup() {
 function ensureZenRegistryStub() {
   const registry = loadRegistry();
   if (registry.providers.some((pr) => pr.id === "zen")) return;
-  registry.providers.push(zenRegistryStub());
+  registry.providers.push(zenRegistryStub("free"));
   saveRegistry(registry);
 }
 async function runFirstRunWizard(trace = false) {
@@ -2171,7 +2030,6 @@ async function runFirstRunWizard(trace = false) {
     if (!apiKey) return "cancel";
     await migrateGlobalOpencodeCredential();
     ensureZenRegistryStub();
-    setSubscriptionTier("free");
     p2.log.success("OpenCode Zen ready \u2014 picking a model next.");
     return "continue";
   }
@@ -3200,6 +3058,123 @@ import pc4 from "picocolors";
 import { networkInterfaces } from "os";
 import * as p5 from "@clack/prompts";
 
+// src/config.ts
+import { dirname as dirname2, join as join6 } from "path";
+import { copyFileSync as copyFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "fs";
+function readJsonFile(path) {
+  try {
+    const parsed = JSON.parse(readFileSync5(path, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+function ensureAppHomeMigrated() {
+  const configPath = getConfigPath();
+  if (existsSync6(configPath)) return;
+  const legacyConfig = join6(getLegacyAppHome(), "config.json");
+  if (!existsSync6(legacyConfig)) return;
+  mkdirSync3(getAppHome(), { recursive: true });
+  copyFileSync2(legacyConfig, configPath);
+  const legacyVertex = join6(getLegacyAppHome(), "vertex-models.json");
+  const vertexPath = join6(getAppHome(), "vertex-models.json");
+  if (existsSync6(legacyVertex) && !existsSync6(vertexPath)) {
+    copyFileSync2(legacyVertex, vertexPath);
+  }
+}
+function ensureConfigMigrated() {
+  ensureAppHomeMigrated();
+  const configPath = getConfigPath();
+  if (existsSync6(configPath)) return;
+  const legacyPath = getLegacyConfPath();
+  if (!existsSync6(legacyPath)) return;
+  const legacy = readJsonFile(legacyPath);
+  if (!legacy) return;
+  mkdirSync3(dirname2(configPath), { recursive: true });
+  writeFileSync2(configPath, `${JSON.stringify(legacy, null, 2)}
+`, "utf8");
+  try {
+    renameSync2(legacyPath, `${legacyPath}.migrated`);
+  } catch {
+  }
+}
+function readConfig() {
+  ensureConfigMigrated();
+  return readJsonFile(getConfigPath()) ?? {};
+}
+function writeConfig(config) {
+  const configPath = getConfigPath();
+  mkdirSync3(dirname2(configPath), { recursive: true });
+  writeFileSync2(configPath, `${JSON.stringify(config, null, 2)}
+`, "utf8");
+}
+function loadPreferences() {
+  const config = readConfig();
+  const lastProvider = config.lastProvider === "opencode" ? "zen" : config.lastProvider;
+  return {
+    lastBackend: config.lastBackend,
+    lastModel: config.lastModel,
+    lastProvider,
+    recentModelsByProvider: config.recentModelsByProvider,
+    favoriteModels: config.favoriteModels,
+    server: config.server
+  };
+}
+function savePreferences(prefs) {
+  const config = readConfig();
+  if (prefs.lastBackend !== void 0) config.lastBackend = prefs.lastBackend;
+  if (prefs.lastModel !== void 0) config.lastModel = prefs.lastModel;
+  if (prefs.lastProvider !== void 0) config.lastProvider = prefs.lastProvider;
+  if (prefs.recentModelsByProvider !== void 0) config.recentModelsByProvider = prefs.recentModelsByProvider;
+  if (prefs.favoriteModels !== void 0) config.favoriteModels = prefs.favoriteModels;
+  writeConfig(config);
+}
+function getSavedServerPassword() {
+  return readConfig().server?.savedPassword?.trim() || null;
+}
+function setSavedServerPassword(password3) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    savedPassword: password3
+  };
+  writeConfig(config);
+}
+function getServerExposedProviders() {
+  const list = readConfig().server?.exposedProviders;
+  return list && list.length > 0 ? list : null;
+}
+function setServerExposedProviders(providerIds) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    exposedProviders: providerIds
+  };
+  writeConfig(config);
+}
+function getServerMaskGatewayIds() {
+  return readConfig().server?.maskGatewayIds ?? true;
+}
+function setServerMaskGatewayIds(mask) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    maskGatewayIds: mask
+  };
+  writeConfig(config);
+}
+function getServerFavoritesOnly() {
+  return readConfig().server?.favoritesOnly ?? false;
+}
+function setServerFavoritesOnly(favoritesOnly) {
+  const config = readConfig();
+  config.server = {
+    ...config.server ?? {},
+    favoritesOnly
+  };
+  writeConfig(config);
+}
+
 // src/registry/materialize.ts
 function cachedModelToLocal(cached, provider) {
   const npm = cached.npm ?? provider.api.npm ?? "";
@@ -3260,11 +3235,10 @@ async function loadRegistryProviders(diag) {
 }
 
 // src/provider-catalog.ts
-async function fetchZenGoModels(backends, persistCache = false) {
+async function fetchZenGoModels(backends) {
   const results = await Promise.all(
     backends.map(async (id) => {
-      const result = await getModels(BACKENDS[id], getCachedModels(id) ?? void 0);
-      if (!result.fromCache && persistCache) setCachedModels(id, result.models);
+      const result = await getModels(BACKENDS[id]);
       return { id, models: result.models };
     })
   );
@@ -3277,17 +3251,12 @@ async function fetchZenGoModels(backends, persistCache = false) {
   return { zenModels, goModels };
 }
 async function resolveLocalProviders() {
-  const fromRegistry = await loadRegistryProviders();
-  if (fromRegistry.length > 0) return fromRegistry;
-  if (process.env["RELAY_AI_LEGACY_SERVE"] === "0") return [];
-  const fromOpencode = await fetchLocalProviders();
-  return fromOpencode ?? [];
+  return loadRegistryProviders();
 }
-async function fetchProviderCatalog(opts) {
-  const persistCache = opts?.persistCache ?? false;
+async function fetchProviderCatalog() {
   const [localProviders, zenGo] = await Promise.all([
     resolveLocalProviders(),
-    fetchZenGoModels(["zen", "go"], persistCache)
+    fetchZenGoModels(["zen", "go"])
   ]);
   return {
     localProviders,
@@ -3974,9 +3943,57 @@ function getLocalIp() {
   }
   return "<this-computer-ip>";
 }
-function modelsForTier(tier, backendId, models) {
-  if (tier === "free") return backendId === "zen" ? models.filter((model) => model.isFree) : [];
-  if (tier === "go") return backendId === "zen" ? models.filter((model) => model.isFree) : models;
+function filterZenModelsForServer(models) {
+  const zenProvider = loadRegistry().providers.find((entry) => entry.id === "zen" && entry.enabled);
+  if (zenProvider?.subscriptionFilter === "free") {
+    return models.filter((model) => model.isFree);
+  }
+  return models;
+}
+function usableGoModels(models) {
+  return models.filter((model) => model.modelFormat !== "unsupported");
+}
+function providerOptionsFromCatalog(catalog) {
+  const options = [];
+  const zenModels = filterZenModelsForServer(catalog.zenModels);
+  if (zenModels.length > 0) {
+    options.push({
+      id: "zen",
+      name: "OpenCode Zen",
+      modelCount: zenModels.length
+    });
+  }
+  const goModels = usableGoModels(catalog.goModels);
+  if (goModels.length > 0) {
+    options.push({
+      id: "go",
+      name: "OpenCode Go",
+      modelCount: goModels.length
+    });
+  }
+  for (const provider of catalog.localProviders) {
+    options.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount: provider.models.length
+    });
+  }
+  return options;
+}
+async function loadServerModels() {
+  const catalog = await fetchProviderCatalog();
+  const models = [];
+  const zenModels = filterZenModelsForServer(catalog.zenModels);
+  if (zenModels.length > 0) {
+    models.push(...zenGoModelsToServerModels(zenModels));
+  }
+  const goModels = usableGoModels(catalog.goModels);
+  if (goModels.length > 0) {
+    models.push(...zenGoModelsToServerModels(goModels));
+  }
+  if (catalog.localProviders.length > 0) {
+    models.push(...localProvidersToServerModels(catalog.localProviders));
+  }
   return models;
 }
 function waitForShutdown() {
@@ -4012,71 +4029,20 @@ async function getServerPasswordForMode(mode) {
   }
   return serverPassword;
 }
-async function loadServerModels(tier) {
-  const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
-  const needsGo = tier === "go" || tier === "both";
-  const models = [];
-  const zenGoBackends = [];
-  if (needsZen) zenGoBackends.push("zen");
-  if (needsGo) zenGoBackends.push("go");
-  if (zenGoBackends.length > 0) {
-    const zenGo = await fetchZenGoModels(zenGoBackends, true);
-    if (needsZen) models.push(...zenGoModelsToServerModels(modelsForTier(tier, "zen", zenGo.zenModels)));
-    if (needsGo) models.push(...zenGoModelsToServerModels(modelsForTier(tier, "go", zenGo.goModels)));
-  }
-  try {
-    const localProviders = await fetchLocalProviders();
-    if (localProviders !== null) {
-      models.push(...localProvidersToServerModels(localProviders));
-    } else {
-      p5.log.info("No local providers found \u2014 using cloud models only");
-    }
-  } catch {
-    p5.log.info("No local providers found \u2014 using cloud models only");
-  }
-  return models;
-}
-function providerOptionsForTier(tier, catalog) {
-  const options = [];
-  const needsZen = tier === "free" || tier === "zen" || tier === "go" || tier === "both";
-  const needsGo = tier === "go" || tier === "both";
-  if (needsZen && catalog.zenModels.length > 0) {
-    options.push({
-      id: "zen",
-      name: "OpenCode Zen",
-      modelCount: modelsForTier(tier, "zen", catalog.zenModels).length
-    });
-  }
-  if (needsGo && catalog.goModels.length > 0) {
-    options.push({
-      id: "go",
-      name: "OpenCode Go",
-      modelCount: modelsForTier(tier, "go", catalog.goModels).length
-    });
-  }
-  for (const provider of catalog.localProviders) {
-    options.push({
-      id: provider.id,
-      name: provider.name,
-      modelCount: provider.models.length
-    });
-  }
-  return options;
-}
-async function configureExposedProviders(tier) {
+async function configureExposedProviders() {
   p5.log.info("Add providers to expose. Listed providers are removed when selected \u2014 like favorites.");
   const spinner5 = p5.spinner();
   spinner5.start("Loading providers...");
   const catalog = await fetchProviderCatalog();
   spinner5.stop("");
-  const available = providerOptionsForTier(tier, catalog);
+  const available = providerOptionsFromCatalog(catalog);
   const picked = await selectServerProviders(available, getServerExposedProviders() ?? void 0);
   if (!picked) return void 0;
   setServerExposedProviders(picked);
   p5.log.success(`Saved ${picked.length} provider${picked.length !== 1 ? "s" : ""} for future server runs.`);
   return picked;
 }
-async function runServerWizard(tier) {
+async function runServerWizard() {
   p5.intro(pc4.bold("  Relay AI \u2014 Server"));
   const startMode = await askServerStartMode();
   if (!startMode) return void 0;
@@ -4087,7 +4053,7 @@ async function runServerWizard(tier) {
       favoritesOnly: getServerFavoritesOnly()
     };
   }
-  const exposedProviders = await configureExposedProviders(tier);
+  const exposedProviders = await configureExposedProviders();
   if (exposedProviders === void 0) return void 0;
   const maskGatewayIds = await askMaskGatewayIds(getServerMaskGatewayIds());
   if (maskGatewayIds === null) return void 0;
@@ -4147,33 +4113,35 @@ async function runVertexServerCommand() {
   await server.close();
   return 0;
 }
+async function resolveServerUpstreamApiKey() {
+  let apiKey = sanitizeCredential(resolveApiKey());
+  if (apiKey) return apiKey;
+  apiKey = sanitizeCredential(await readFromCredentialStore((reason) => {
+    p5.log.warn(`Credential store unavailable \u2014 ${reason}`);
+  }));
+  if (apiKey) {
+    const isMac = process.platform === "darwin";
+    const isWindows3 = process.platform === "win32";
+    const storeName = isMac ? "macOS Keychain" : isWindows3 ? "Windows Credential Manager" : "Secret Service";
+    p5.log.success(`Found key in ${storeName}`);
+    return apiKey;
+  }
+  const catalog = await fetchProviderCatalog();
+  if (catalog.localProviders.some((provider) => provider.apiKey.trim())) {
+    return "registry-local";
+  }
+  return null;
+}
 async function runServerCommand(options = {}) {
   if (options.vertex) {
     return runVertexServerCommand();
   }
-  let apiKey = resolveApiKey();
+  const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
-    apiKey = await readFromCredentialStore((reason) => {
-      p5.log.warn(`Credential store unavailable \u2014 ${reason}`);
-    });
-    if (apiKey) {
-      const isMac = process.platform === "darwin";
-      const isWindows3 = process.platform === "win32";
-      const storeName = isMac ? "macOS Keychain" : isWindows3 ? "Windows Credential Manager" : "Secret Service";
-      p5.log.success(`Found key in ${storeName}`);
-    }
-  }
-  apiKey = sanitizeCredential(apiKey) ?? "";
-  if (!apiKey) {
-    p5.log.error("Missing OPENCODE_API_KEY. Run `relay-ai claude` once to configure your key, or export OPENCODE_API_KEY.");
+    p5.log.error("No providers configured. Run `relay-ai providers add` or import, or set OPENCODE_API_KEY for Zen/Go.");
     return 1;
   }
-  const tier = getSubscriptionTier();
-  if (!tier) {
-    p5.log.error("Missing subscription tier. Run `relay-ai claude --setup` first.");
-    return 1;
-  }
-  const runConfig = await runServerWizard(tier);
+  const runConfig = await runServerWizard();
   if (!runConfig) return 0;
   const mode = await askListenMode();
   if (!mode) return 0;
@@ -4184,7 +4152,7 @@ async function runServerCommand(options = {}) {
   spinner5.start("Fetching available models...");
   let models;
   try {
-    models = await loadServerModels(tier);
+    models = await loadServerModels();
     if (runConfig.exposedProviders) {
       models = filterServerModelsByProviders(models, runConfig.exposedProviders);
     }
@@ -4204,7 +4172,7 @@ async function runServerCommand(options = {}) {
     }
     if (models.length === 0) {
       spinner5.stop(pc4.red("No models to expose"));
-      p5.log.error("Add providers in the server wizard \u2014 Configure & start \u2192 manage exposed providers.");
+      p5.log.error("Add providers with `relay-ai providers add` or configure exposed providers in the server wizard.");
       return 1;
     }
     const localCount = models.filter((m) => m.apiKey !== void 0).length;
@@ -4212,7 +4180,7 @@ async function runServerCommand(options = {}) {
     const filterNote = runConfig.exposedProviders ? ` \u2014 ${runConfig.exposedProviders.length} provider${runConfig.exposedProviders.length !== 1 ? "s" : ""}` : "";
     const favoritesNote = runConfig.favoritesOnly ? " \u2014 favorites only" : "";
     const maskNote = runConfig.maskGatewayIds ? " \u2014 discovery ids masked" : "";
-    spinner5.stop(`Loaded ${models.length} models (${localCount} from local providers)${filterNote}${favoritesNote}${maskNote}`);
+    spinner5.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p5.log.info(summary);
   } catch (err) {
     spinner5.stop(pc4.red("Failed to load models"));
@@ -4872,12 +4840,12 @@ async function removeProviderFromRegistry(id, opts) {
     credentialDeleted
   };
 }
-function addZenRegistryStub() {
+function addZenRegistryStub(opts) {
   const registry = loadRegistry();
   if (registry.providers.some((p9) => p9.id === "zen")) {
     return { added: false, reason: "OpenCode Zen is already configured." };
   }
-  registry.providers.push(zenRegistryStub());
+  registry.providers.push(zenRegistryStub(opts?.subscriptionFilter));
   saveRegistry(registry);
   return { added: true };
 }
@@ -5241,12 +5209,11 @@ async function addBuiltinZen() {
     if (!collected) return 0;
     await migrateGlobalOpencodeCredential();
   }
-  const result = addZenRegistryStub();
+  const result = addZenRegistryStub({ subscriptionFilter: "free" });
   if (!result.added) {
     p7.log.warn(result.reason ?? "Could not add OpenCode Zen.");
     return 0;
   }
-  setSubscriptionTier("free");
   p7.log.success("OpenCode Zen added to your providers.");
   return 0;
 }
@@ -5342,7 +5309,6 @@ async function addBuiltinGo() {
     p7.log.warn(result.reason ?? "Could not add OpenCode Go.");
     return 0;
   }
-  setSubscriptionTier("go");
   p7.log.success("OpenCode Go added to your providers.");
   return 0;
 }
@@ -5991,7 +5957,7 @@ async function runClaudeCommand(parsed) {
       const backends = [];
       if (favorites.some((f) => f.providerId === "zen")) backends.push("zen");
       if (favorites.some((f) => f.providerId === "go")) backends.push("go");
-      const fetched = await fetchZenGoModels(backends, false);
+      const fetched = await fetchZenGoModels(backends);
       earlyZenModels = fetched.zenModels;
       earlyGoModels = fetched.goModels;
       zenGoSpinner.stop("");
@@ -6005,7 +5971,7 @@ async function runClaudeCommand(parsed) {
   catalogSpinner.start("Loading your providers...");
   let catalog;
   try {
-    catalog = await fetchProviderCatalog({ persistCache: !dryRun });
+    catalog = await fetchProviderCatalog();
   } catch (err) {
     catalogSpinner.stop("");
     console.error(pc7.red(String(err instanceof Error ? err.message : err)));

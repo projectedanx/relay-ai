@@ -3,8 +3,6 @@ import type { ModelInfo } from '../src/types.js';
 
 const state = vi.hoisted(() => ({
   apiKey: 'real-key',
-  tier: 'zen' as 'free' | 'zen' | 'go' | 'both' | null,
-  cachedModels: null as ModelInfo[] | null,
   savedPassword: null as string | null,
   listenMode: 'local' as 'local' | 'network' | null,
   serverPassword: 'typed-password' as string | null,
@@ -28,14 +26,11 @@ vi.mock('../src/env.js', () => ({
 }));
 
 vi.mock('../src/config.js', () => ({
-  getCachedModels: () => state.cachedModels,
   getSavedServerPassword: () => state.savedPassword,
   getServerExposedProviders: () => null,
   getServerMaskGatewayIds: () => true,
   getServerFavoritesOnly: () => false,
-  getSubscriptionTier: () => state.tier,
   loadPreferences: () => ({ favoriteModels: [] }),
-  setCachedModels: vi.fn(),
   setSavedServerPassword: (password: string) => {
     state.savedPassword = password;
   },
@@ -48,9 +43,13 @@ vi.mock('../src/models.js', () => ({
   getModels: vi.fn(async () => ({ models, fromCache: false })),
 }));
 
-// Avoid spawning a real `opencode serve` subprocess during the unit test.
-vi.mock('../src/opencode-serve.js', () => ({
-  fetchLocalProviders: vi.fn(async () => null),
+// Registry-only — no opencode serve subprocess in server load path.
+vi.mock('../src/registry/load.js', () => ({
+  loadRegistryProviders: vi.fn(async () => []),
+}));
+
+vi.mock('../src/registry/io.js', () => ({
+  loadRegistry: vi.fn(() => ({ schemaVersion: 1, providers: [] })),
 }));
 
 vi.mock('../src/server/prompts.js', () => ({
@@ -76,8 +75,6 @@ vi.mock('../src/server/router.js', () => ({
 describe('runServerCommand', () => {
   beforeEach(() => {
     state.apiKey = 'real-key';
-    state.tier = 'zen';
-    state.cachedModels = null;
     state.savedPassword = null;
     state.listenMode = 'local';
     state.serverPassword = 'typed-password';
