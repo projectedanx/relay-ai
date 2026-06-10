@@ -1,7 +1,7 @@
 // Context window resolution for proxy /v1/models and Claude Code child env.
 //
 // Priority:
-//   1. OpenCode models.json cache (limit.context) — opencode/opencode-go keys first
+//   1. OpenCode models.json cache (limit.context) — `opencode` / `opencode-go` file keys first
 //   2. ID-pattern heuristics for models not in cache
 //   3. 200K default (Claude Code's own fallback for unknown models)
 import { readFileSync } from 'node:fs';
@@ -9,6 +9,7 @@ import { OPENCODE_CACHE_PATH } from './constants.js';
 
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
+/** OpenCode cache file provider keys for Zen/Go (not relay-ai registry ids). */
 const CACHE_PROVIDER_PRIORITY = new Set(['opencode', 'opencode-go']);
 
 export interface OpencodeCacheModel {

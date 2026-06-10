@@ -31,7 +31,7 @@ export function readModelsFromCache(
   const cache = loadOpencodeCache();
   if (!cache) return null;
 
-  const providerKey = backendId === 'zen' ? 'opencode' : 'opencode-go';
+  const providerKey = backendId === 'zen' ? 'opencode' : 'opencode-go'; // OpenCode cache file keys
   const providerData = cache[providerKey];
   if (!providerData?.models) return null;
 

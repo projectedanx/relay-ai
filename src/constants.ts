@@ -41,6 +41,7 @@ export const CONFLICTING_ENV_VARS = [
 
 export type ConflictingEnvVar = (typeof CONFLICTING_ENV_VARS)[number];
 
+// Optional enrichment from OpenCode CLI (~/.cache/opencode/models.json) — not a runtime dependency.
 export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models.json');
 
 /** Max models in favorites list and mid-session /model switch catalog. */
