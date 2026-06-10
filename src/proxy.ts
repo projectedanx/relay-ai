@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
+import { getProxyDebugLogPath, redactTraceLine, resetTraceLog } from './trace-log.js';
 import { relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
 import { createLanguageModel, isSdkMigratedNpm } from './provider-factory.js';
 import {
@@ -16,25 +17,28 @@ import {
 type ProxyLog = (message: string | (() => string)) => void;
 
 function appendSecureLog(logPath: string, line: string): void {
+  const redacted = redactTraceLine(line);
   try {
     const fd = openSync(logPath, 'a', 0o600);
     try {
-      writeSync(fd, `${new Date().toISOString()} ${line}\n`);
+      writeSync(fd, `${new Date().toISOString()} ${redacted}\n`);
     } finally {
       closeSync(fd);
     }
   } catch {
     try {
-      appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
+      appendFileSync(logPath, `${new Date().toISOString()} ${redacted}\n`);
     } catch { /* ignore */ }
   }
 }
 
-function makeProxyLog(debug: boolean, logPath = '/tmp/relay-ai-proxy-debug.log'): ProxyLog {
+function makeProxyLog(debug: boolean, logPath?: string): ProxyLog {
   if (!debug) return () => {};
+  const path = logPath ?? getProxyDebugLogPath();
+  resetTraceLog(path);
   return (message) => {
     const line = typeof message === 'function' ? message() : message;
-    appendSecureLog(logPath, line);
+    appendSecureLog(path, line);
   };
 }
 

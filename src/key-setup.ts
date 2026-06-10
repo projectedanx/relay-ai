@@ -2,9 +2,10 @@
 
 import * as p from '@clack/prompts';
 import { appendFileSync, readFileSync, existsSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { getClaudeDebugLogPath, writeSecureLogLine } from './trace-log.js';
 import {
   GLOBAL_OPENCODE_KEYRING_ACCOUNT,
   isSecretServiceAvailable,
@@ -50,12 +51,7 @@ export async function resolveOrCollectApiKey(simulate = false, trace = false): P
     const keyDiag = (reason: string) => {
       p.log.warn(`Credential store unavailable — ${reason}`);
       if (trace) {
-        try {
-          appendFileSync(
-            join(tmpdir(), 'relay-ai-debug.log'),
-            `${new Date().toISOString()} keyring: ${reason}\n`,
-          );
-        } catch { /* ignore */ }
+        writeSecureLogLine(getClaudeDebugLogPath(), `keyring: ${reason}`);
       }
     };
     const storedKey = await readFromCredentialStore(keyDiag);

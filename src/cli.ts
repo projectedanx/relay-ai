@@ -1,8 +1,7 @@
 // src/cli.ts
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
-import { readFileSync, existsSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findClaudeBinary, launchClaude } from './launch.js';
@@ -27,6 +26,7 @@ import { BACKENDS, VERSION } from './constants.js';
 import type { ParsedArgs, ModelInfo, FavoriteModel } from './types.js';
 import { addFavorite, removeFavorite } from './favorites.js';
 import { runProvidersCommand, providersHelpText } from './providers-command.js';
+import { prepareClaudeTraceLog, printTraceLog } from './trace-log.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--setup', '--trace', '--help', '-h', '--version', '-v']);
 
 function emptyParsed(command: ParsedArgs['command']): ParsedArgs {
@@ -160,7 +160,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Options:')}
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --setup      Re-configure your subscription tier
-  --trace      Write debug logs to /tmp and show errors on exit
+  --trace      Write debug logs to ~/.relay-ai/logs/ and show errors on exit
   --help       Show this command help
   --version    Show version
 
@@ -276,7 +276,7 @@ async function launchClaudeViaCatalog(
     true,
   );
 
-  const debugLogPath = join(tmpdir(), 'relay-ai-debug.log');
+  const debugLogPath = prepareClaudeTraceLog();
   const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
   if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 
@@ -284,21 +284,6 @@ async function launchClaudeViaCatalog(
   proxyHandle.close();
   if (trace) printTraceLog(debugLogPath);
   return exitCode;
-}
-
-function printTraceLog(debugLogPath: string): void {
-  if (!existsSync(debugLogPath)) return;
-  const log = readFileSync(debugLogPath, 'utf8');
-  const errorLines = log.split('\n').filter(l =>
-    l.includes('error') || l.includes('Error') || l.includes('"type":"error"') || l.includes('status')
-  );
-  console.log('\n' + pc.bold(pc.cyan('── Debug trace ──')));
-  if (errorLines.length > 0) {
-    errorLines.slice(0, 30).forEach(l => console.log(pc.dim(l)));
-  } else {
-    console.log(pc.dim('(no errors found in debug log)'));
-  }
-  console.log(pc.dim(`Full log: ${debugLogPath}`));
 }
 
 function printDryRun(
@@ -727,7 +712,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
     }
 
-    const debugLogPath = join(tmpdir(), 'relay-ai-debug.log');
+    const debugLogPath = prepareClaudeTraceLog();
     const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
     if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 
@@ -782,7 +767,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   }
 
-  const debugLogPath = join(tmpdir(), 'relay-ai-debug.log');
+  const debugLogPath = prepareClaudeTraceLog();
   const traceArgs = trace ? ['--debug-file', debugLogPath] : [];
   if (trace) p.log.info(`Debug log: ${debugLogPath}`);
 

@@ -72,7 +72,7 @@ If a model fails mid-session (not the login prompt above):
 relay-ai claude --trace
 ```
 
-After exit, relay-ai prints errors from `/tmp/relay-ai-debug.log`. The proxy also logs to `/tmp/relay-ai-proxy-debug.log` when `--trace` is set.
+After exit, relay-ai prints errors from `~/.relay-ai/logs/claude-debug.log` (secrets redacted in the summary). The proxy also logs to `~/.relay-ai/logs/proxy-debug.log` when `--trace` is set.
 
 ---
 

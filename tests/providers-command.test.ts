@@ -17,7 +17,7 @@ describe('parseProvidersArgs', () => {
     expect(parseProvidersArgs([])).toEqual({ subcommand: 'hub', showHelp: false });
   });
 
-  it('parses add, import, list, remove', () => {
+  it('parses add, import, list, remove, refresh-models', () => {
     expect(parseProvidersArgs(['add'])).toEqual({ subcommand: 'add', showHelp: false });
     expect(parseProvidersArgs(['import'])).toEqual({ subcommand: 'import', showHelp: false });
     expect(parseProvidersArgs(['list'])).toEqual({ subcommand: 'list', showHelp: false });
@@ -25,6 +25,12 @@ describe('parseProvidersArgs', () => {
       subcommand: 'remove',
       showHelp: false,
       removeId: 'groq',
+    });
+    expect(parseProvidersArgs(['refresh-models'])).toEqual({ subcommand: 'refresh-models', showHelp: false });
+    expect(parseProvidersArgs(['refresh-models', 'nvidia'])).toEqual({
+      subcommand: 'refresh-models',
+      showHelp: false,
+      removeId: 'nvidia',
     });
   });
 
@@ -36,6 +42,7 @@ describe('parseProvidersArgs', () => {
     const help = providersHelpText();
     expect(help).toContain('providers add');
     expect(help).toContain('providers remove');
+    expect(help).toContain('refresh-models');
     expect(help).toContain('Phase 1.1');
   });
 });

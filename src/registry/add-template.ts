@@ -5,6 +5,13 @@ import { isSdkMigratedNpm } from '../provider-factory.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import {
+  buildPricingIndex,
+  enrichModelsWithPricing,
+  enrichPricingAsync,
+  loadPricingCache,
+  pricingPlatformForProvider,
+} from './pricing.js';
 import type { RegistryProvider } from './types.js';
 
 export interface AddTemplateResult {
@@ -74,6 +81,13 @@ export async function addProviderFromTemplate(
   }
 
   const now = new Date().toISOString();
+  const pricingCache = loadPricingCache();
+  const platform = pricingPlatformForProvider(template.id, template.id);
+  const pricedModels = enrichModelsWithPricing(
+    fetched.models.map(m => ({ ...m, apiUrl: fetched.baseUrl })),
+    buildPricingIndex(pricingCache),
+    platform,
+  );
   const entry: RegistryProvider = {
     id: template.id,
     templateId: template.id,
@@ -88,10 +102,7 @@ export async function addProviderFromTemplate(
     refreshedAt: now,
     modelsCache: {
       fetchedAt: now,
-      models: fetched.models.map(m => ({
-        ...m,
-        apiUrl: fetched.baseUrl,
-      })),
+      models: pricedModels,
     },
   };
 
@@ -102,6 +113,7 @@ export async function addProviderFromTemplate(
     registry.providers.push(entry);
   }
   saveRegistry(registry);
+  enrichPricingAsync();
 
   return { added: true, provider: entry, modelCount: fetched.models.length };
 }

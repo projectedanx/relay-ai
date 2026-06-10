@@ -120,7 +120,7 @@ No favorites? Launch works like before: single model, no switch menu. `--dry-run
 |------|-------------|
 | `--dry-run` | Run the full wizard but preview the launch command instead of executing |
 | `--setup` | Re-configure your subscription tier |
-| `--trace` | Write debug logs to `/tmp/relay-ai-debug.log` and show errors on exit |
+| `--trace` | Write debug logs to `~/.relay-ai/logs/` and show errors on exit |
 | `--help` | Show command help |
 | `--version` | Show version |
 
@@ -284,7 +284,7 @@ The SDK adapter proxy starts on a random local port for proxy-routed models and 
 
 **Mistral (free tier):** Rate limits are tight. Expect HTTP 429 during tool-heavy sessions. Claude Code retries with backoff. That's Mistral throttling, not a proxy bug.
 
-**OpenAI (OpenCode-configured provider):** Configure OpenAI in [OpenCode](https://opencode.ai) with your API key, then pick the OpenAI provider at launch. Newer GPT models use OpenAI's Responses API. The SDK picks `responses` vs `chat` from the model ID. OpenCode catalog IDs can differ from API IDs (e.g. `gpt-5.5-fast` maps to upstream `gpt-5.5`). If you see "model not available", run `relay-ai claude --trace` and check `/tmp/relay-ai-debug.log`.
+**OpenAI (OpenCode-configured provider):** Configure OpenAI in [OpenCode](https://opencode.ai) with your API key, then pick the OpenAI provider at launch. Newer GPT models use OpenAI's Responses API. The SDK picks `responses` vs `chat` from the model ID. OpenCode catalog IDs can differ from API IDs (e.g. `gpt-5.5-fast` maps to upstream `gpt-5.5`). If you see "model not available", run `relay-ai claude --trace` and check `~/.relay-ai/logs/claude-debug.log`.
 
 `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set for direct (non-proxy) routes only. Proxy sessions keep tool-search betas.
 

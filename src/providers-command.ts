@@ -2,7 +2,7 @@
 
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
-import { migrateGlobalOpencodeCredential, readGlobalOpencodeCredential } from './env.js';
+import { migrateGlobalOpencodeCredential, readGlobalOpencodeCredential, resolveProviderCredential } from './env.js';
 import {
   resolveProvidersForDisplay,
   resolveZenGoAvailability,
@@ -23,10 +23,11 @@ import {
   toggleProviderEnabled,
 } from './registry/crud.js';
 import { loadRegistry } from './registry/io.js';
+import { refreshAllProviderModels, refreshProviderModels } from './registry/refresh-models.js';
 import { resolveOrCollectApiKey } from './key-setup.js';
 import { setSubscriptionTier } from './config.js';
 
-export type ProvidersSubcommand = 'hub' | 'add' | 'import' | 'list' | 'remove' | 'help';
+export type ProvidersSubcommand = 'hub' | 'add' | 'import' | 'list' | 'remove' | 'refresh-models' | 'help';
 
 export function parseProvidersArgs(args: string[]): {
   subcommand: ProvidersSubcommand;
@@ -54,6 +55,11 @@ export function parseProvidersArgs(args: string[]): {
     if (rest.length > 1) return { subcommand: 'remove', showHelp: false, error: `Unknown remove option: ${rest[1]}` };
     return { subcommand: 'remove', showHelp: false, removeId: rest[0] };
   }
+  if (first === 'refresh-models') {
+    if (rest.length === 0) return { subcommand: 'refresh-models', showHelp: false };
+    if (rest.length > 1) return { subcommand: 'refresh-models', showHelp: false, error: `Unknown refresh-models option: ${rest[1]}` };
+    return { subcommand: 'refresh-models', showHelp: false, removeId: rest[0] };
+  }
   return { subcommand: 'hub', showHelp: false, error: `Unknown providers subcommand: ${first}` };
 }
 
@@ -66,6 +72,7 @@ ${pc.bold('Usage:')}
   relay-ai providers import
   relay-ai providers list
   relay-ai providers remove <id>
+  relay-ai providers refresh-models [id]
 
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard ${pc.dim('[Phase 1.1]')}
@@ -73,8 +80,9 @@ ${pc.bold('Subcommands:')}
   import      Bring settings from OpenCode (one-time) ${pc.dim('[Phase 1.0]')}
   list        Show configured providers ${pc.dim('[Phase 1.0]')}
   remove      Remove a provider by id ${pc.dim('[Phase 1.1]')}
+  refresh-models  Update cached model lists ${pc.dim('[Phase 1.2]')}
 
-${pc.dim('Coming soon: refresh-models, auth (OAuth), custom endpoints under Advanced')}`;
+${pc.dim('Coming soon: auth (OAuth)')}`;
 }
 
 function maskAuthRef(authRef: string): string {
@@ -144,6 +152,58 @@ export async function runProvidersImport(): Promise<number> {
     }
   }
   return 0;
+}
+
+export async function runProvidersRefreshModels(providerId?: string): Promise<number> {
+  const resolveKey = async (provider: { id: string; authRef: string }) =>
+    resolveProviderCredential(provider.id, provider.authRef);
+
+  if (providerId) {
+    const registry = loadRegistry();
+    const provider = registry.providers.find(p => p.id === providerId);
+    if (!provider) {
+      p.log.error(`Provider not found: ${providerId}`);
+      return 1;
+    }
+    const spinner = p.spinner();
+    spinner.start(`Refreshing ${provider.name}...`);
+    const key = await resolveKey(provider);
+    const result = await refreshProviderModels(providerId, key);
+    spinner.stop('');
+    if (result.skipped) {
+      p.log.warn(`${result.name}: ${result.reason}`);
+      return 0;
+    }
+    if (!result.ok) {
+      p.log.error(`${result.name}: ${result.reason ?? 'Refresh failed.'}`);
+      return 1;
+    }
+    p.log.success(`${result.name}: ${result.modelCount} model${result.modelCount === 1 ? '' : 's'} updated.`);
+    return 0;
+  }
+
+  const spinner = p.spinner();
+  spinner.start('Refreshing model lists...');
+  const { refreshed } = await refreshAllProviderModels(resolveKey);
+  spinner.stop('');
+
+  const ok = refreshed.filter(r => r.ok && !r.skipped);
+  const skipped = refreshed.filter(r => r.skipped);
+  const failed = refreshed.filter(r => !r.ok);
+
+  if (ok.length > 0) {
+    p.log.success(`Updated ${ok.length} provider${ok.length === 1 ? '' : 's'}.`);
+    for (const r of ok) {
+      p.log.info(`  ${r.name}: ${r.modelCount} model${r.modelCount === 1 ? '' : 's'}`);
+    }
+  }
+  for (const r of skipped) {
+    p.log.warn(`Skipped ${r.name}: ${r.reason}`);
+  }
+  for (const r of failed) {
+    p.log.error(`${r.name}: ${r.reason ?? 'Refresh failed.'}`);
+  }
+  return failed.length > 0 ? 1 : 0;
 }
 
 export async function runProvidersList(): Promise<number> {
@@ -464,6 +524,11 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
     message: 'What would you like to do?',
     options: [
       {
+        value: 'refresh',
+        label: 'Refresh model list',
+        hint: 'Fetch latest models from the provider API',
+      },
+      {
         value: 'toggle',
         label: provider.enabled ? 'Disable provider' : 'Enable provider',
         hint: provider.enabled ? 'Hide from relay-ai claude picker' : 'Show in relay-ai claude picker',
@@ -473,6 +538,11 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
     ],
   });
   if (p.isCancel(action) || action === 'back') return 'back';
+
+  if (action === 'refresh') {
+    await runProvidersRefreshModels(id);
+    return 'back';
+  }
 
   if (action === 'toggle') {
     const result = toggleProviderEnabled(id);
@@ -552,6 +622,7 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
   if (parsed.subcommand === 'list') return runProvidersList();
   if (parsed.subcommand === 'add') return runProvidersAdd();
   if (parsed.subcommand === 'remove' && parsed.removeId) return runProvidersRemove(parsed.removeId);
+  if (parsed.subcommand === 'refresh-models') return runProvidersRefreshModels(parsed.removeId);
 
   p.intro(pc.bold('  Your AI providers'));
   return runProvidersHub();
