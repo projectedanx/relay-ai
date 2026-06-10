@@ -2,19 +2,44 @@
 
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
+import { migrateGlobalOpencodeCredential, readGlobalOpencodeCredential } from './env.js';
+import {
+  resolveProvidersForDisplay,
+  resolveZenGoAvailability,
+} from './provider-catalog.js';
+import { findOpencodeBinary } from './providers.js';
+import {
+  filterTemplates,
+  listAddableTemplates,
+  type ProviderTemplate,
+} from './provider-templates.js';
+import { addProviderFromTemplate } from './registry/add-template.js';
 import { importFromOpencode } from './registry/import-opencode.js';
+import {
+  addGoRegistryStub,
+  addZenRegistryStub,
+  removeProviderFromRegistry,
+  toggleProviderEnabled,
+} from './registry/crud.js';
 import { loadRegistry } from './registry/io.js';
+import { resolveOrCollectApiKey } from './key-setup.js';
+import { setSubscriptionTier } from './config.js';
 
-export type ProvidersSubcommand = 'hub' | 'import' | 'list' | 'help';
+export type ProvidersSubcommand = 'hub' | 'add' | 'import' | 'list' | 'remove' | 'help';
 
 export function parseProvidersArgs(args: string[]): {
   subcommand: ProvidersSubcommand;
   showHelp: boolean;
+  removeId?: string;
   error?: string;
 } {
   if (args.length === 0) return { subcommand: 'hub', showHelp: false };
   const [first, ...rest] = args;
   if (first === '--help' || first === '-h') return { subcommand: 'help', showHelp: true };
+  if (first === 'add') {
+    if (rest.length > 0) return { subcommand: 'add', showHelp: false, error: `Unknown add option: ${rest[0]}` };
+    return { subcommand: 'add', showHelp: false };
+  }
   if (first === 'import') {
     if (rest.length > 0) return { subcommand: 'import', showHelp: false, error: `Unknown import option: ${rest[0]}` };
     return { subcommand: 'import', showHelp: false };
@@ -22,6 +47,11 @@ export function parseProvidersArgs(args: string[]): {
   if (first === 'list') {
     if (rest.length > 0) return { subcommand: 'list', showHelp: false, error: `Unknown list option: ${rest[0]}` };
     return { subcommand: 'list', showHelp: false };
+  }
+  if (first === 'remove') {
+    if (rest.length === 0) return { subcommand: 'remove', showHelp: false, error: 'Usage: relay-ai providers remove <id>' };
+    if (rest.length > 1) return { subcommand: 'remove', showHelp: false, error: `Unknown remove option: ${rest[1]}` };
+    return { subcommand: 'remove', showHelp: false, removeId: rest[0] };
   }
   return { subcommand: 'hub', showHelp: false, error: `Unknown providers subcommand: ${first}` };
 }
@@ -31,17 +61,31 @@ export function providersHelpText(): string {
 
 ${pc.bold('Usage:')}
   relay-ai providers
+  relay-ai providers add
   relay-ai providers import
   relay-ai providers list
+  relay-ai providers remove <id>
 
 ${pc.bold('Subcommands:')}
-  (none)      Provider hub wizard
-  import      Bring settings from OpenCode (one-time)
-  list        Show configured providers`;
+  (none)      Provider hub wizard ${pc.dim('[Phase 1.1]')}
+  add         Add a provider (Groq, Mistral, Together AI, …) ${pc.dim('[Phase 1.1]')}
+  import      Bring settings from OpenCode (one-time) ${pc.dim('[Phase 1.0]')}
+  list        Show configured providers ${pc.dim('[Phase 1.0]')}
+  remove      Remove a provider by id ${pc.dim('[Phase 1.1]')}
+
+${pc.dim('Coming soon: refresh-models, auth (OAuth), custom endpoints under Advanced')}`;
 }
 
-function maskKeySuffix(keyRef: string): string {
-  return keyRef.startsWith('keyring:') ? 'keychain' : keyRef;
+function maskAuthRef(authRef: string): string {
+  if (authRef.startsWith('keyring:global:opencode')) return 'keychain (shared Zen/Go key)';
+  if (authRef.startsWith('keyring:')) return 'keychain';
+  if (authRef.startsWith('env:')) return authRef;
+  return authRef;
+}
+
+function providerLabel(name: string, modelCount: number, enabled: boolean): string {
+  const star = enabled ? '★' : '○';
+  return `${star} ${name} (${modelCount} model${modelCount === 1 ? '' : 's'})`;
 }
 
 export async function runProvidersImport(): Promise<number> {
@@ -57,7 +101,7 @@ export async function runProvidersImport(): Promise<number> {
 
   if (result.imported.length === 0 && result.skipped.length === 0) {
     p.log.warn('No configured providers found in OpenCode.');
-    p.log.info('Add providers in OpenCode first, or use relay-ai providers add (coming soon).');
+    p.log.info('Add providers in OpenCode first, or use relay-ai providers add.');
     return 0;
   }
 
@@ -75,24 +119,324 @@ export async function runProvidersImport(): Promise<number> {
   return 0;
 }
 
-export function runProvidersList(): number {
-  const registry = loadRegistry();
-  if (registry.providers.length === 0) {
-    p.log.info('No providers configured. Run relay-ai providers import or add a provider.');
+export async function runProvidersList(): Promise<number> {
+  const entries = await resolveProvidersForDisplay();
+  if (entries.length === 0) {
+    p.log.info('No providers configured. Run relay-ai providers add or import.');
     return 0;
   }
 
   console.log('');
-  for (const provider of registry.providers) {
-    const modelCount = provider.modelsCache?.models.length ?? 0;
-    const status = provider.enabled ? pc.green('●') : pc.dim('○');
+  for (const entry of entries) {
+    const status = entry.enabled ? pc.green('●') : pc.dim('○');
+    const cloudNote = entry.cloudBuiltin ? pc.dim(' · cloud builtin') : '';
     console.log(
-      `  ${status} ${pc.bold(provider.name)} ${pc.dim(`(${provider.id})`)} — `
-      + `${modelCount} model${modelCount === 1 ? '' : 's'}, auth: ${maskKeySuffix(provider.authRef)}`,
+      `  ${status} ${pc.bold(entry.name)} ${pc.dim(`(${entry.id})`)} — `
+      + `${entry.modelCount} model${entry.modelCount === 1 ? '' : 's'}, auth: ${entry.authLabel}${cloudNote}`,
     );
   }
   console.log('');
   return 0;
+}
+
+async function addBuiltinZen(): Promise<number> {
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    const collected = await resolveOrCollectApiKey();
+    if (!collected) return 0;
+    await migrateGlobalOpencodeCredential();
+  }
+  const result = addZenRegistryStub();
+  if (!result.added) {
+    p.log.warn(result.reason ?? 'Could not add OpenCode Zen.');
+    return 0;
+  }
+  setSubscriptionTier('free');
+  p.log.success('OpenCode Zen added to your providers.');
+  return 0;
+}
+
+async function pickTemplateFromCatalog(): Promise<ProviderTemplate | null> {
+  while (true) {
+    const templates = listAddableTemplates(loadRegistry().providers.map(p => p.id));
+    if (templates.length === 0) return null;
+
+    const method = await p.select({
+      message: `Choose a provider (${templates.length} available)`,
+      options: [
+        { value: 'search', label: 'Search providers', hint: 'e.g. gro, mistral, together' },
+        { value: 'browse', label: 'Browse all providers', hint: 'Scroll the full list' },
+        { value: 'back', label: 'Back', hint: '' },
+      ],
+    });
+    if (p.isCancel(method) || method === 'back') return null;
+
+    if (method === 'browse') {
+      const options = templates.map(t => ({
+        value: t.id,
+        label: t.name,
+        hint: t.npm,
+      }));
+      const picked = await p.select({ message: 'Select a provider', options });
+      if (p.isCancel(picked)) continue;
+      const template = templates.find(t => t.id === picked);
+      if (template) return template;
+      continue;
+    }
+
+    const searchInput = await p.text({
+      message: 'Search providers:',
+      placeholder: 'e.g. groq, mistral, openrouter',
+    });
+    if (p.isCancel(searchInput)) continue;
+
+    const matched = filterTemplates(templates, String(searchInput));
+    if (matched.length === 0) {
+      p.log.warn('No providers match — try a different search');
+      continue;
+    }
+
+    const options = matched.map(t => ({
+      value: t.id,
+      label: t.name,
+      hint: t.npm,
+    }));
+    const picked = await p.select({
+      message: matched.length === 1 ? 'Match found' : `Select provider (${matched.length} matches)`,
+      options,
+    });
+    if (p.isCancel(picked)) continue;
+    const template = matched.find(t => t.id === picked);
+    if (template) return template;
+  }
+}
+
+async function runTemplateAddFlow(): Promise<number> {
+  if (listAddableTemplates(loadRegistry().providers.map(p => p.id)).length === 0) {
+    p.log.info('All catalog providers are already configured.');
+    return 0;
+  }
+
+  const template = await pickTemplateFromCatalog();
+  if (!template) return 0;
+
+  if (template.signupUrl) {
+    p.note(`Get an API key at:\n${template.signupUrl}`, template.name);
+  }
+
+  const apiKey = await p.password({
+    message: `Paste your ${template.name} API key:`,
+    validate: val => val.trim() ? undefined : 'Key cannot be empty',
+  });
+  if (p.isCancel(apiKey)) {
+    p.cancel('Cancelled.');
+    return 0;
+  }
+
+  const spinner = p.spinner();
+  spinner.start(`Testing connection to ${template.name}...`);
+  const result = await addProviderFromTemplate(template, String(apiKey));
+  spinner.stop('');
+
+  if (!result.added) {
+    p.log.error(result.error ?? 'Could not add provider.');
+    if (result.hint) p.log.info(result.hint);
+    return 1;
+  }
+
+  p.log.success(`Connected · ${result.modelCount} model${result.modelCount === 1 ? '' : 's'} — ${template.name} saved.`);
+  return 0;
+}
+
+async function addBuiltinGo(): Promise<number> {
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    const collected = await resolveOrCollectApiKey();
+    if (!collected) return 0;
+    await migrateGlobalOpencodeCredential();
+  }
+  const result = addGoRegistryStub();
+  if (!result.added) {
+    p.log.warn(result.reason ?? 'Could not add OpenCode Go.');
+    return 0;
+  }
+  setSubscriptionTier('go');
+  p.log.success('OpenCode Go added to your providers.');
+  return 0;
+}
+
+export async function runProvidersAdd(): Promise<number> {
+  const registry = loadRegistry();
+  const zenGo = await resolveZenGoAvailability();
+  const hasZen = zenGo.zen;
+  const hasGo = zenGo.go;
+  const hasOpencode = findOpencodeBinary() !== null;
+
+  const options: Array<{ value: string; label: string; hint: string }> = [
+    { value: 'import', label: 'Bring settings from OpenCode', hint: hasOpencode ? 'One-time import' : 'Requires OpenCode CLI' },
+  ];
+  if (!hasZen) {
+    options.push({ value: 'zen', label: 'Add OpenCode Zen (free)', hint: 'Uses your OpenCode API key' });
+  }
+  if (!hasGo) {
+    options.push({ value: 'go', label: 'Add OpenCode Go (paid)', hint: 'Uses your OpenCode API key' });
+  }
+  const addableTemplates = listAddableTemplates(registry.providers.map(p => p.id));
+  if (addableTemplates.length > 0) {
+    options.push({
+      value: 'templates',
+      label: 'Add Groq, Mistral, Together AI, …',
+      hint: `${addableTemplates.length} provider${addableTemplates.length === 1 ? '' : 's'} available`,
+    });
+  }
+
+  const choice = await p.select({ message: 'Add a provider', options });
+  if (p.isCancel(choice)) {
+    p.cancel('Cancelled.');
+    return 0;
+  }
+
+  if (choice === 'import') {
+    if (!hasOpencode) {
+      p.log.error('OpenCode CLI not found. Install from https://opencode.ai');
+      return 1;
+    }
+    return runProvidersImport();
+  }
+  if (choice === 'zen') return addBuiltinZen();
+  if (choice === 'go') return addBuiltinGo();
+  if (choice === 'templates') return runTemplateAddFlow();
+  return 0;
+}
+
+export async function runProvidersRemove(id: string, interactive = false): Promise<number> {
+  const registry = loadRegistry();
+  const provider = registry.providers.find(pr => pr.id === id);
+  if (!provider) {
+    p.log.error(`Provider not found: ${id}`);
+    return 1;
+  }
+
+  if (interactive) {
+    const confirm = await p.confirm({
+      message: `Remove ${provider.name} (${id})?`,
+      initialValue: false,
+    });
+    if (p.isCancel(confirm) || !confirm) {
+      p.cancel('Cancelled.');
+      return 0;
+    }
+  }
+
+  const result = await removeProviderFromRegistry(id);
+  if (!result.removed) {
+    p.log.error(result.error ?? `Could not remove ${id}`);
+    return 1;
+  }
+
+  p.log.success(`Removed ${result.name ?? id}.`);
+  if (result.credentialDeleted) {
+    p.log.info('Provider API key removed from Keychain.');
+  }
+  return 0;
+}
+
+async function runCloudBuiltinDetail(id: 'zen' | 'go'): Promise<'back'> {
+  const name = id === 'zen' ? 'OpenCode Zen' : 'OpenCode Go';
+  p.note(
+    `${name} is already active via your saved OpenCode API key.\n`
+    + 'It does not need to be added separately — relay-ai fetches its models live from OpenCode.',
+    'Cloud provider',
+  );
+  return 'back';
+}
+
+async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
+  const registry = loadRegistry();
+  const provider = registry.providers.find(pr => pr.id === id);
+  if (!provider) return 'back';
+
+  const modelCount = provider.modelsCache?.models.length ?? 0;
+  p.note(
+    `${modelCount} cached model${modelCount === 1 ? '' : 's'} · auth: ${maskAuthRef(provider.authRef)}`,
+    provider.name,
+  );
+
+  const action = await p.select({
+    message: 'What would you like to do?',
+    options: [
+      {
+        value: 'toggle',
+        label: provider.enabled ? 'Disable provider' : 'Enable provider',
+        hint: provider.enabled ? 'Hide from relay-ai claude picker' : 'Show in relay-ai claude picker',
+      },
+      { value: 'remove', label: 'Remove provider', hint: 'Delete from registry and Keychain when safe' },
+      { value: 'back', label: 'Back', hint: '' },
+    ],
+  });
+  if (p.isCancel(action) || action === 'back') return 'back';
+
+  if (action === 'toggle') {
+    const result = toggleProviderEnabled(id);
+    if (result.toggled) {
+      p.log.success(`${provider.name} ${result.enabled ? 'enabled' : 'disabled'}.`);
+    }
+    return 'back';
+  }
+
+  const code = await runProvidersRemove(id, true);
+  return code === 0 ? 'removed' : 'back';
+}
+
+export async function runProvidersHub(): Promise<number> {
+  const hasOpencode = findOpencodeBinary() !== null;
+
+  while (true) {
+    const entries = await resolveProvidersForDisplay();
+    const options: Array<{ value: string; label: string; hint?: string }> = [];
+
+    for (const entry of entries) {
+      const hint = entry.cloudBuiltin ? 'Active via OpenCode API key' : entry.id;
+      const value = entry.cloudBuiltin ? `cloud:${entry.id}` : `provider:${entry.id}`;
+      options.push({
+        value,
+        label: providerLabel(entry.name, entry.modelCount, entry.enabled),
+        hint,
+      });
+    }
+
+    options.push({ value: 'add', label: '+ Add a provider', hint: '' });
+    if (hasOpencode) {
+      options.push({ value: 'import', label: '→ Bring settings from OpenCode', hint: 'One-time import' });
+    }
+    options.push({ value: 'done', label: 'Done', hint: '' });
+
+    const choice = await p.select({
+      message: entries.length > 0 ? 'Your AI providers' : 'Get started',
+      options,
+    });
+    if (p.isCancel(choice) || choice === 'done') {
+      return 0;
+    }
+    if (choice === 'add') {
+      await runProvidersAdd();
+      continue;
+    }
+    if (choice === 'import') {
+      await runProvidersImport();
+      continue;
+    }
+    if (typeof choice === 'string' && choice.startsWith('cloud:')) {
+      const id = choice.slice('cloud:'.length);
+      if (id === 'zen' || id === 'go') await runCloudBuiltinDetail(id);
+      continue;
+    }
+    if (typeof choice === 'string' && choice.startsWith('provider:')) {
+      const id = choice.slice('provider:'.length);
+      const outcome = await runProviderDetail(id);
+      if (outcome === 'removed') continue;
+    }
+  }
 }
 
 export async function runProvidersCommand(args: string[]): Promise<number> {
@@ -108,21 +452,9 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
 
   if (parsed.subcommand === 'import') return runProvidersImport();
   if (parsed.subcommand === 'list') return runProvidersList();
+  if (parsed.subcommand === 'add') return runProvidersAdd();
+  if (parsed.subcommand === 'remove' && parsed.removeId) return runProvidersRemove(parsed.removeId);
 
   p.intro(pc.bold('  Your AI providers'));
-  const choice = await p.select({
-    message: 'What would you like to do?',
-    options: [
-      { value: 'list', label: 'List configured providers' },
-      { value: 'import', label: 'Bring settings from OpenCode' },
-      { value: 'done', label: 'Done' },
-    ],
-  });
-  if (p.isCancel(choice)) {
-    p.cancel('Cancelled.');
-    return 0;
-  }
-  if (choice === 'list') return runProvidersList();
-  if (choice === 'import') return runProvidersImport();
-  return 0;
+  return runProvidersHub();
 }

@@ -380,6 +380,11 @@ async function saveProviderCredential(authRef, key, diag) {
   if (!parsed || parsed.kind !== "keyring") return false;
   return writeKeyringAccount(parsed.account, key, diag);
 }
+async function deleteProviderCredential(authRef, diag) {
+  const parsed = parseAuthRef(authRef);
+  if (!parsed || parsed.kind !== "keyring") return false;
+  return deleteKeyringAccount(parsed.account, diag);
+}
 async function readFromCredentialStore(diag) {
   return readGlobalOpencodeCredential(diag);
 }
@@ -727,11 +732,11 @@ function setSubscriptionTier(tier) {
 function getSavedServerPassword() {
   return readConfig().server?.savedPassword?.trim() || null;
 }
-function setSavedServerPassword(password2) {
+function setSavedServerPassword(password3) {
   const config = readConfig();
   config.server = {
     ...config.server ?? {},
-    savedPassword: password2
+    savedPassword: password3
   };
   writeConfig(config);
 }
@@ -1030,6 +1035,17 @@ function zenRegistryStub() {
     id: "zen",
     templateId: "zen",
     name: "OpenCode Zen",
+    enabled: true,
+    authRef: "keyring:global:opencode",
+    api: {},
+    addedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function goRegistryStub() {
+  return {
+    id: "go",
+    templateId: "go",
+    name: "OpenCode Go",
     enabled: true,
     authRef: "keyring:global:opencode",
     api: {},
@@ -1476,13 +1492,13 @@ async function postJsonUpstream(url, body, apiKey) {
     headers: anthropicUpstreamHeaders(apiKey, false),
     body: JSON.stringify(body)
   });
-  const text3 = await response.text();
+  const text4 = await response.text();
   let parsed = null;
-  if (text3) {
+  if (text4) {
     try {
-      parsed = JSON.parse(text3);
+      parsed = JSON.parse(text4);
     } catch {
-      parsed = text3;
+      parsed = text4;
     }
   }
   return { status: response.status, body: parsed };
@@ -1744,8 +1760,8 @@ function inlineSystemText(messages) {
   const parts = [];
   for (const msg of messages) {
     if (msg.role !== "system") continue;
-    const text3 = typeof msg.content === "string" ? msg.content : msg.content.map((b) => b.text ?? "").join("\n");
-    if (text3.trim()) parts.push(text3.trim());
+    const text4 = typeof msg.content === "string" ? msg.content : msg.content.map((b) => b.text ?? "").join("\n");
+    if (text4.trim()) parts.push(text4.trim());
   }
   return parts;
 }
@@ -1779,9 +1795,9 @@ function annotateToolNames(messages) {
 }
 function thinkingToSdkPart(block, npm) {
   if (npm !== "@ai-sdk/google" && npm !== "@ai-sdk/openai") return null;
-  const text3 = block.thinking ?? "";
-  if (npm === "@ai-sdk/openai" && !block.signature && !text3.trim()) return null;
-  const part = { type: "reasoning", text: text3 };
+  const text4 = block.thinking ?? "";
+  if (npm === "@ai-sdk/openai" && !block.signature && !text4.trim()) return null;
+  const part = { type: "reasoning", text: text4 };
   if (block.signature) {
     part.providerOptions = npm === "@ai-sdk/google" ? { google: { thoughtSignature: block.signature } } : { openai: { reasoningEncryptedContent: block.signature } };
   }
@@ -2437,6 +2453,73 @@ function providersForPicker(catalog) {
     ...catalog.localProviders
   ];
 }
+function countUsableZenGoModels(models) {
+  return models.filter((m) => m.modelFormat !== "unsupported").length;
+}
+async function resolveProvidersForDisplay() {
+  const reg = loadRegistry();
+  const registryIds = new Set(reg.providers.map((p9) => p9.id));
+  const entries = [];
+  const opencodeKey = await readGlobalOpencodeCredential();
+  let zenCount = 0;
+  let goCount = 0;
+  if (opencodeKey) {
+    const zenGo = await fetchZenGoModels(["zen", "go"]);
+    zenCount = countUsableZenGoModels(zenGo.zenModels);
+    goCount = countUsableZenGoModels(zenGo.goModels);
+    if (!registryIds.has("zen") && zenCount > 0) {
+      entries.push({
+        id: "zen",
+        name: "OpenCode Zen",
+        modelCount: zenCount,
+        enabled: true,
+        authLabel: "keychain (OpenCode API key)",
+        inRegistry: false,
+        cloudBuiltin: "zen"
+      });
+    }
+    if (!registryIds.has("go") && goCount > 0) {
+      entries.push({
+        id: "go",
+        name: "OpenCode Go",
+        modelCount: goCount,
+        enabled: true,
+        authLabel: "keychain (OpenCode API key)",
+        inRegistry: false,
+        cloudBuiltin: "go"
+      });
+    }
+  }
+  for (const provider of reg.providers) {
+    let modelCount = provider.modelsCache?.models.length ?? 0;
+    if (provider.id === "zen" && zenCount > 0) modelCount = zenCount;
+    if (provider.id === "go" && goCount > 0) modelCount = goCount;
+    entries.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount,
+      enabled: provider.enabled,
+      authLabel: provider.authRef.startsWith("keyring:global:opencode") ? "keychain (OpenCode API key)" : provider.authRef.startsWith("keyring:") ? "keychain" : provider.authRef,
+      inRegistry: true
+    });
+  }
+  return entries;
+}
+async function resolveZenGoAvailability() {
+  const reg = loadRegistry();
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    return {
+      zen: reg.providers.some((p9) => p9.id === "zen"),
+      go: reg.providers.some((p9) => p9.id === "go")
+    };
+  }
+  const zenGo = await fetchZenGoModels(["zen", "go"]);
+  return {
+    zen: reg.providers.some((p9) => p9.id === "zen") || countUsableZenGoModels(zenGo.zenModels) > 0,
+    go: reg.providers.some((p9) => p9.id === "go") || countUsableZenGoModels(zenGo.goModels) > 0
+  };
+}
 function localProvidersToServerModels(localProviders) {
   const models = [];
   for (const provider of localProviders) {
@@ -2548,15 +2631,15 @@ async function askServerPassword() {
     "Anyone on your network who knows this password can use this server through your OpenCode account.",
     "Network mode warning"
   );
-  const password2 = await p3.text({
+  const password3 = await p3.text({
     message: "Choose a server password for this run:",
     validate: (value) => value.trim() ? void 0 : "Password cannot be empty"
   });
-  if (p3.isCancel(password2)) {
+  if (p3.isCancel(password3)) {
     p3.cancel("Cancelled.");
     return null;
   }
-  return String(password2).trim();
+  return String(password3).trim();
 }
 async function askUseSavedServerPassword() {
   const choice = await p3.select({
@@ -3700,10 +3783,440 @@ function removeFavorite(list, fav) {
 // src/providers-command.ts
 import pc5 from "picocolors";
 import * as p7 from "@clack/prompts";
+
+// src/provider-templates.ts
+var PROVIDER_TEMPLATES = [
+  {
+    id: "groq",
+    name: "Groq",
+    authType: "api",
+    npm: "@ai-sdk/groq",
+    defaultBaseUrl: "https://api.groq.com/openai/v1",
+    signupUrl: "https://console.groq.com/keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "mistral",
+    name: "Mistral",
+    authType: "api",
+    npm: "@ai-sdk/mistral",
+    defaultBaseUrl: "https://api.mistral.ai/v1",
+    signupUrl: "https://console.mistral.ai/api-keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "togetherai",
+    name: "Together AI",
+    authType: "api",
+    npm: "@ai-sdk/togetherai",
+    defaultBaseUrl: "https://api.together.xyz/v1",
+    signupUrl: "https://api.together.xyz/settings/api-keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "cerebras",
+    name: "Cerebras",
+    authType: "api",
+    npm: "@ai-sdk/cerebras",
+    defaultBaseUrl: "https://api.cerebras.ai/v1",
+    signupUrl: "https://cloud.cerebras.ai",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "deepinfra",
+    name: "DeepInfra",
+    authType: "api",
+    npm: "@ai-sdk/deepinfra",
+    defaultBaseUrl: "https://api.deepinfra.com/v1/openai",
+    signupUrl: "https://deepinfra.com/dash/api_keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "xai",
+    name: "xAI",
+    authType: "api",
+    npm: "@ai-sdk/xai",
+    defaultBaseUrl: "https://api.x.ai/v1",
+    signupUrl: "https://console.x.ai",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "perplexity",
+    name: "Perplexity",
+    authType: "api",
+    npm: "@ai-sdk/perplexity",
+    defaultBaseUrl: "https://api.perplexity.ai",
+    signupUrl: "https://www.perplexity.ai/settings/api",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "cohere",
+    name: "Cohere",
+    authType: "api",
+    npm: "@ai-sdk/cohere",
+    defaultBaseUrl: "https://api.cohere.com/compatibility/v1",
+    signupUrl: "https://dashboard.cohere.com/api-keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    authType: "api",
+    npm: "@ai-sdk/openai",
+    defaultBaseUrl: "https://api.openai.com/v1",
+    signupUrl: "https://platform.openai.com/api-keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "google",
+    name: "Google Gemini",
+    authType: "api",
+    npm: "@ai-sdk/google",
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    signupUrl: "https://aistudio.google.com/apikey",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "alibaba",
+    name: "Alibaba DashScope",
+    authType: "api",
+    npm: "@ai-sdk/alibaba",
+    defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    signupUrl: "https://dashscope.console.aliyun.com/apiKey",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    authType: "api",
+    npm: "@openrouter/ai-sdk-provider",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    signupUrl: "https://openrouter.ai/keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "venice",
+    name: "Venice AI",
+    authType: "api",
+    npm: "venice-ai-sdk-provider",
+    defaultBaseUrl: "https://api.venice.ai/api/v1",
+    signupUrl: "https://venice.ai/settings/api",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    authType: "api",
+    npm: "@ai-sdk/anthropic",
+    defaultBaseUrl: "https://api.anthropic.com",
+    signupUrl: "https://console.anthropic.com/settings/keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "bedrock",
+    name: "Amazon Bedrock",
+    authType: "api",
+    npm: "@ai-sdk/amazon-bedrock",
+    modelSource: "manual-only",
+    supported: false,
+    unsupportedReason: "Requires AWS credentials \u2014 use relay-ai providers import from OpenCode for now."
+  },
+  {
+    id: "azure",
+    name: "Azure OpenAI",
+    authType: "api",
+    npm: "@ai-sdk/azure",
+    modelSource: "manual-only",
+    supported: false,
+    unsupportedReason: "Requires Azure deployment URLs \u2014 use relay-ai providers import from OpenCode for now."
+  },
+  {
+    id: "vertex",
+    name: "Google Vertex AI",
+    authType: "none",
+    npm: "@ai-sdk/google-vertex",
+    modelSource: "manual-only",
+    supported: false,
+    unsupportedReason: "Uses gcloud Application Default Credentials \u2014 use relay-ai server --vertex instead."
+  }
+];
+function listSupportedTemplates() {
+  return PROVIDER_TEMPLATES.filter((t) => t.supported && t.authType === "api");
+}
+function listAddableTemplates(configuredIds = []) {
+  const configured = new Set(configuredIds);
+  return listSupportedTemplates().filter((t) => !configured.has(t.id));
+}
+function filterTemplates(templates, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return templates;
+  return templates.filter(
+    (t) => t.id.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.npm.toLowerCase().includes(q)
+  );
+}
+
+// src/registry/fetch-template-models.ts
+var TEST_TIMEOUT_MS = 1e4;
+function modelFormatForNpm(npm) {
+  return npm === "@ai-sdk/anthropic" ? "anthropic" : "openai";
+}
+function modelsUrl(baseUrl) {
+  const trimmed = baseUrl.replace(/\/$/, "");
+  if (trimmed.endsWith("/v1")) return `${trimmed}/models`;
+  return `${trimmed}/v1/models`;
+}
+function parseModelList(body, npm) {
+  const rows = body.data ?? body.models ?? [];
+  const format = modelFormatForNpm(npm);
+  const models = [];
+  for (const row of rows) {
+    const id = row.id?.trim();
+    if (!id) continue;
+    const family = id.split(/[-/:]/)[0] ?? id;
+    models.push({
+      id,
+      name: row.name?.trim() || id,
+      upstreamModelId: id,
+      family,
+      brand: deriveBrand(family),
+      contextWindow: resolveContextWindow(id),
+      modelFormat: format,
+      npm
+    });
+  }
+  return models;
+}
+async function fetchTemplateModels(template, apiKey, baseUrlOverride) {
+  const baseUrl = (baseUrlOverride ?? template.defaultBaseUrl)?.replace(/\/$/, "");
+  if (!baseUrl) {
+    return {
+      models: [],
+      baseUrl: "",
+      error: "This provider needs a base URL.",
+      hint: "Use relay-ai providers import from OpenCode for advanced setups."
+    };
+  }
+  const url = modelsUrl(baseUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json"
+      },
+      redirect: "manual",
+      signal: controller.signal
+    });
+    if (response.status >= 300 && response.status < 400) {
+      return {
+        models: [],
+        baseUrl,
+        error: "Provider redirected the connection test.",
+        hint: "Check the base URL \u2014 redirects are blocked for security."
+      };
+    }
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      const detail = body.slice(0, 200).trim();
+      if (response.status === 401 || response.status === 403) {
+        return {
+          models: [],
+          baseUrl,
+          error: "API key was rejected.",
+          hint: template.signupUrl ? `Get or verify your key at ${template.signupUrl}` : "Double-check the key you pasted."
+        };
+      }
+      return {
+        models: [],
+        baseUrl,
+        error: `Provider returned HTTP ${response.status}.`,
+        hint: detail || "Check your API key and try again."
+      };
+    }
+    const json = await response.json();
+    const models = parseModelList(json, template.npm);
+    if (models.length === 0) {
+      return {
+        models: [],
+        baseUrl,
+        error: "Connected but no models were returned.",
+        hint: "The API key may be valid but model listing is unavailable for this provider."
+      };
+    }
+    return { models, baseUrl };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const timedOut = message.includes("abort") || message.includes("Abort");
+    return {
+      models: [],
+      baseUrl,
+      error: timedOut ? "Connection timed out after 10 seconds." : "Could not reach the provider.",
+      hint: timedOut ? "Check your network or try again." : "Verify the provider is online and your API key is correct."
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// src/registry/add-template.ts
+async function probeTemplatePackage(template) {
+  if (!template.supported) return template.unsupportedReason ?? "Provider is not supported yet.";
+  if (!template.npm) return "Template is missing an SDK package.";
+  if (!isSdkMigratedNpm(template.npm) && template.npm !== "@ai-sdk/anthropic") {
+    return `SDK package ${template.npm} is not available in relay-ai.`;
+  }
+  try {
+    await import(template.npm);
+    return null;
+  } catch {
+    return `Could not load ${template.npm}. Run npm install in your relay-ai checkout.`;
+  }
+}
+async function addProviderFromTemplate(template, apiKey, opts) {
+  const packageError = await probeTemplatePackage(template);
+  if (packageError) {
+    return { added: false, error: packageError };
+  }
+  const trimmedKey = apiKey.trim();
+  if (!trimmedKey) {
+    return { added: false, error: "API key cannot be empty." };
+  }
+  const registry = loadRegistry();
+  const existing = registry.providers.find((p9) => p9.id === template.id);
+  if (existing && !opts?.replaceExisting) {
+    return {
+      added: false,
+      error: `${template.name} is already configured.`,
+      hint: `Remove it first with: relay-ai providers remove ${template.id}`
+    };
+  }
+  const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
+  if (fetched.error || fetched.models.length === 0) {
+    return {
+      added: false,
+      error: fetched.error ?? "No models returned.",
+      hint: fetched.hint
+    };
+  }
+  const saved = await saveProviderCredential(`keyring:provider:${template.id}`, trimmedKey);
+  if (!saved) {
+    return {
+      added: false,
+      error: "Could not save API key to Keychain.",
+      hint: "Grant Keychain access or try again."
+    };
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const entry = {
+    id: template.id,
+    templateId: template.id,
+    name: template.name,
+    enabled: true,
+    authRef: `keyring:provider:${template.id}`,
+    api: {
+      npm: template.npm,
+      url: fetched.baseUrl
+    },
+    addedAt: existing?.addedAt ?? now,
+    refreshedAt: now,
+    modelsCache: {
+      fetchedAt: now,
+      models: fetched.models.map((m) => ({
+        ...m,
+        apiUrl: fetched.baseUrl
+      }))
+    }
+  };
+  if (existing) {
+    const idx = registry.providers.findIndex((p9) => p9.id === template.id);
+    registry.providers[idx] = entry;
+  } else {
+    registry.providers.push(entry);
+  }
+  saveRegistry(registry);
+  return { added: true, provider: entry, modelCount: fetched.models.length };
+}
+
+// src/registry/crud.ts
+function credentialStillReferenced(authRef, remaining) {
+  return remaining.some((p9) => p9.authRef === authRef);
+}
+async function removeProviderFromRegistry(id, opts) {
+  const registry = loadRegistry();
+  const index = registry.providers.findIndex((p9) => p9.id === id);
+  if (index < 0) {
+    return { removed: false, id, credentialDeleted: false, error: `Provider not found: ${id}` };
+  }
+  const [removedProvider] = registry.providers.splice(index, 1);
+  saveRegistry(registry);
+  let credentialDeleted = false;
+  if (opts?.deleteCredential !== false) {
+    const parsed = parseAuthRef(removedProvider.authRef);
+    const isGlobal = parsed?.kind === "keyring" && parsed.account === GLOBAL_OPENCODE_KEYRING_ACCOUNT;
+    const shouldDelete = !isGlobal || !credentialStillReferenced(removedProvider.authRef, registry.providers);
+    if (shouldDelete && parsed?.kind === "keyring") {
+      credentialDeleted = await deleteProviderCredential(removedProvider.authRef);
+    }
+  }
+  return {
+    removed: true,
+    id,
+    name: removedProvider.name,
+    credentialDeleted
+  };
+}
+function addZenRegistryStub() {
+  const registry = loadRegistry();
+  if (registry.providers.some((p9) => p9.id === "zen")) {
+    return { added: false, reason: "OpenCode Zen is already configured." };
+  }
+  registry.providers.push(zenRegistryStub());
+  saveRegistry(registry);
+  return { added: true };
+}
+function addGoRegistryStub() {
+  const registry = loadRegistry();
+  if (registry.providers.some((p9) => p9.id === "go")) {
+    return { added: false, reason: "OpenCode Go is already configured." };
+  }
+  registry.providers.push(goRegistryStub());
+  saveRegistry(registry);
+  return { added: true };
+}
+function toggleProviderEnabled(id) {
+  const registry = loadRegistry();
+  const provider = registry.providers.find((p9) => p9.id === id);
+  if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
+  provider.enabled = !provider.enabled;
+  saveRegistry(registry);
+  return { toggled: true, enabled: provider.enabled };
+}
+
+// src/providers-command.ts
 function parseProvidersArgs(args) {
   if (args.length === 0) return { subcommand: "hub", showHelp: false };
   const [first, ...rest] = args;
   if (first === "--help" || first === "-h") return { subcommand: "help", showHelp: true };
+  if (first === "add") {
+    if (rest.length > 0) return { subcommand: "add", showHelp: false, error: `Unknown add option: ${rest[0]}` };
+    return { subcommand: "add", showHelp: false };
+  }
   if (first === "import") {
     if (rest.length > 0) return { subcommand: "import", showHelp: false, error: `Unknown import option: ${rest[0]}` };
     return { subcommand: "import", showHelp: false };
@@ -3712,6 +4225,11 @@ function parseProvidersArgs(args) {
     if (rest.length > 0) return { subcommand: "list", showHelp: false, error: `Unknown list option: ${rest[0]}` };
     return { subcommand: "list", showHelp: false };
   }
+  if (first === "remove") {
+    if (rest.length === 0) return { subcommand: "remove", showHelp: false, error: "Usage: relay-ai providers remove <id>" };
+    if (rest.length > 1) return { subcommand: "remove", showHelp: false, error: `Unknown remove option: ${rest[1]}` };
+    return { subcommand: "remove", showHelp: false, removeId: rest[0] };
+  }
   return { subcommand: "hub", showHelp: false, error: `Unknown providers subcommand: ${first}` };
 }
 function providersHelpText() {
@@ -3719,16 +4237,29 @@ function providersHelpText() {
 
 ${pc5.bold("Usage:")}
   relay-ai providers
+  relay-ai providers add
   relay-ai providers import
   relay-ai providers list
+  relay-ai providers remove <id>
 
 ${pc5.bold("Subcommands:")}
-  (none)      Provider hub wizard
-  import      Bring settings from OpenCode (one-time)
-  list        Show configured providers`;
+  (none)      Provider hub wizard ${pc5.dim("[Phase 1.1]")}
+  add         Add a provider (Groq, Mistral, Together AI, \u2026) ${pc5.dim("[Phase 1.1]")}
+  import      Bring settings from OpenCode (one-time) ${pc5.dim("[Phase 1.0]")}
+  list        Show configured providers ${pc5.dim("[Phase 1.0]")}
+  remove      Remove a provider by id ${pc5.dim("[Phase 1.1]")}
+
+${pc5.dim("Coming soon: refresh-models, auth (OAuth), custom endpoints under Advanced")}`;
 }
-function maskKeySuffix(keyRef) {
-  return keyRef.startsWith("keyring:") ? "keychain" : keyRef;
+function maskAuthRef(authRef) {
+  if (authRef.startsWith("keyring:global:opencode")) return "keychain (shared Zen/Go key)";
+  if (authRef.startsWith("keyring:")) return "keychain";
+  if (authRef.startsWith("env:")) return authRef;
+  return authRef;
+}
+function providerLabel(name, modelCount, enabled) {
+  const star = enabled ? "\u2605" : "\u25CB";
+  return `${star} ${name} (${modelCount} model${modelCount === 1 ? "" : "s"})`;
 }
 async function runProvidersImport() {
   const spinner5 = p7.spinner();
@@ -3741,7 +4272,7 @@ async function runProvidersImport() {
   }
   if (result.imported.length === 0 && result.skipped.length === 0) {
     p7.log.warn("No configured providers found in OpenCode.");
-    p7.log.info("Add providers in OpenCode first, or use relay-ai providers add (coming soon).");
+    p7.log.info("Add providers in OpenCode first, or use relay-ai providers add.");
     return 0;
   }
   p7.log.success(
@@ -3754,22 +4285,289 @@ async function runProvidersImport() {
   }
   return 0;
 }
-function runProvidersList() {
-  const registry = loadRegistry();
-  if (registry.providers.length === 0) {
-    p7.log.info("No providers configured. Run relay-ai providers import or add a provider.");
+async function runProvidersList() {
+  const entries = await resolveProvidersForDisplay();
+  if (entries.length === 0) {
+    p7.log.info("No providers configured. Run relay-ai providers add or import.");
     return 0;
   }
   console.log("");
-  for (const provider of registry.providers) {
-    const modelCount = provider.modelsCache?.models.length ?? 0;
-    const status = provider.enabled ? pc5.green("\u25CF") : pc5.dim("\u25CB");
+  for (const entry of entries) {
+    const status = entry.enabled ? pc5.green("\u25CF") : pc5.dim("\u25CB");
+    const cloudNote = entry.cloudBuiltin ? pc5.dim(" \xB7 cloud builtin") : "";
     console.log(
-      `  ${status} ${pc5.bold(provider.name)} ${pc5.dim(`(${provider.id})`)} \u2014 ${modelCount} model${modelCount === 1 ? "" : "s"}, auth: ${maskKeySuffix(provider.authRef)}`
+      `  ${status} ${pc5.bold(entry.name)} ${pc5.dim(`(${entry.id})`)} \u2014 ${entry.modelCount} model${entry.modelCount === 1 ? "" : "s"}, auth: ${entry.authLabel}${cloudNote}`
     );
   }
   console.log("");
   return 0;
+}
+async function addBuiltinZen() {
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    const collected = await resolveOrCollectApiKey();
+    if (!collected) return 0;
+    await migrateGlobalOpencodeCredential();
+  }
+  const result = addZenRegistryStub();
+  if (!result.added) {
+    p7.log.warn(result.reason ?? "Could not add OpenCode Zen.");
+    return 0;
+  }
+  setSubscriptionTier("free");
+  p7.log.success("OpenCode Zen added to your providers.");
+  return 0;
+}
+async function pickTemplateFromCatalog() {
+  while (true) {
+    const templates = listAddableTemplates(loadRegistry().providers.map((p9) => p9.id));
+    if (templates.length === 0) return null;
+    const method = await p7.select({
+      message: `Choose a provider (${templates.length} available)`,
+      options: [
+        { value: "search", label: "Search providers", hint: "e.g. gro, mistral, together" },
+        { value: "browse", label: "Browse all providers", hint: "Scroll the full list" },
+        { value: "back", label: "Back", hint: "" }
+      ]
+    });
+    if (p7.isCancel(method) || method === "back") return null;
+    if (method === "browse") {
+      const options2 = templates.map((t) => ({
+        value: t.id,
+        label: t.name,
+        hint: t.npm
+      }));
+      const picked2 = await p7.select({ message: "Select a provider", options: options2 });
+      if (p7.isCancel(picked2)) continue;
+      const template2 = templates.find((t) => t.id === picked2);
+      if (template2) return template2;
+      continue;
+    }
+    const searchInput = await p7.text({
+      message: "Search providers:",
+      placeholder: "e.g. groq, mistral, openrouter"
+    });
+    if (p7.isCancel(searchInput)) continue;
+    const matched = filterTemplates(templates, String(searchInput));
+    if (matched.length === 0) {
+      p7.log.warn("No providers match \u2014 try a different search");
+      continue;
+    }
+    const options = matched.map((t) => ({
+      value: t.id,
+      label: t.name,
+      hint: t.npm
+    }));
+    const picked = await p7.select({
+      message: matched.length === 1 ? "Match found" : `Select provider (${matched.length} matches)`,
+      options
+    });
+    if (p7.isCancel(picked)) continue;
+    const template = matched.find((t) => t.id === picked);
+    if (template) return template;
+  }
+}
+async function runTemplateAddFlow() {
+  if (listAddableTemplates(loadRegistry().providers.map((p9) => p9.id)).length === 0) {
+    p7.log.info("All catalog providers are already configured.");
+    return 0;
+  }
+  const template = await pickTemplateFromCatalog();
+  if (!template) return 0;
+  if (template.signupUrl) {
+    p7.note(`Get an API key at:
+${template.signupUrl}`, template.name);
+  }
+  const apiKey = await p7.password({
+    message: `Paste your ${template.name} API key:`,
+    validate: (val) => val.trim() ? void 0 : "Key cannot be empty"
+  });
+  if (p7.isCancel(apiKey)) {
+    p7.cancel("Cancelled.");
+    return 0;
+  }
+  const spinner5 = p7.spinner();
+  spinner5.start(`Testing connection to ${template.name}...`);
+  const result = await addProviderFromTemplate(template, String(apiKey));
+  spinner5.stop("");
+  if (!result.added) {
+    p7.log.error(result.error ?? "Could not add provider.");
+    if (result.hint) p7.log.info(result.hint);
+    return 1;
+  }
+  p7.log.success(`Connected \xB7 ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} \u2014 ${template.name} saved.`);
+  return 0;
+}
+async function addBuiltinGo() {
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    const collected = await resolveOrCollectApiKey();
+    if (!collected) return 0;
+    await migrateGlobalOpencodeCredential();
+  }
+  const result = addGoRegistryStub();
+  if (!result.added) {
+    p7.log.warn(result.reason ?? "Could not add OpenCode Go.");
+    return 0;
+  }
+  setSubscriptionTier("go");
+  p7.log.success("OpenCode Go added to your providers.");
+  return 0;
+}
+async function runProvidersAdd() {
+  const registry = loadRegistry();
+  const zenGo = await resolveZenGoAvailability();
+  const hasZen = zenGo.zen;
+  const hasGo = zenGo.go;
+  const hasOpencode = findOpencodeBinary() !== null;
+  const options = [
+    { value: "import", label: "Bring settings from OpenCode", hint: hasOpencode ? "One-time import" : "Requires OpenCode CLI" }
+  ];
+  if (!hasZen) {
+    options.push({ value: "zen", label: "Add OpenCode Zen (free)", hint: "Uses your OpenCode API key" });
+  }
+  if (!hasGo) {
+    options.push({ value: "go", label: "Add OpenCode Go (paid)", hint: "Uses your OpenCode API key" });
+  }
+  const addableTemplates = listAddableTemplates(registry.providers.map((p9) => p9.id));
+  if (addableTemplates.length > 0) {
+    options.push({
+      value: "templates",
+      label: "Add Groq, Mistral, Together AI, \u2026",
+      hint: `${addableTemplates.length} provider${addableTemplates.length === 1 ? "" : "s"} available`
+    });
+  }
+  const choice = await p7.select({ message: "Add a provider", options });
+  if (p7.isCancel(choice)) {
+    p7.cancel("Cancelled.");
+    return 0;
+  }
+  if (choice === "import") {
+    if (!hasOpencode) {
+      p7.log.error("OpenCode CLI not found. Install from https://opencode.ai");
+      return 1;
+    }
+    return runProvidersImport();
+  }
+  if (choice === "zen") return addBuiltinZen();
+  if (choice === "go") return addBuiltinGo();
+  if (choice === "templates") return runTemplateAddFlow();
+  return 0;
+}
+async function runProvidersRemove(id, interactive = false) {
+  const registry = loadRegistry();
+  const provider = registry.providers.find((pr) => pr.id === id);
+  if (!provider) {
+    p7.log.error(`Provider not found: ${id}`);
+    return 1;
+  }
+  if (interactive) {
+    const confirm4 = await p7.confirm({
+      message: `Remove ${provider.name} (${id})?`,
+      initialValue: false
+    });
+    if (p7.isCancel(confirm4) || !confirm4) {
+      p7.cancel("Cancelled.");
+      return 0;
+    }
+  }
+  const result = await removeProviderFromRegistry(id);
+  if (!result.removed) {
+    p7.log.error(result.error ?? `Could not remove ${id}`);
+    return 1;
+  }
+  p7.log.success(`Removed ${result.name ?? id}.`);
+  if (result.credentialDeleted) {
+    p7.log.info("Provider API key removed from Keychain.");
+  }
+  return 0;
+}
+async function runCloudBuiltinDetail(id) {
+  const name = id === "zen" ? "OpenCode Zen" : "OpenCode Go";
+  p7.note(
+    `${name} is already active via your saved OpenCode API key.
+It does not need to be added separately \u2014 relay-ai fetches its models live from OpenCode.`,
+    "Cloud provider"
+  );
+  return "back";
+}
+async function runProviderDetail(id) {
+  const registry = loadRegistry();
+  const provider = registry.providers.find((pr) => pr.id === id);
+  if (!provider) return "back";
+  const modelCount = provider.modelsCache?.models.length ?? 0;
+  p7.note(
+    `${modelCount} cached model${modelCount === 1 ? "" : "s"} \xB7 auth: ${maskAuthRef(provider.authRef)}`,
+    provider.name
+  );
+  const action = await p7.select({
+    message: "What would you like to do?",
+    options: [
+      {
+        value: "toggle",
+        label: provider.enabled ? "Disable provider" : "Enable provider",
+        hint: provider.enabled ? "Hide from relay-ai claude picker" : "Show in relay-ai claude picker"
+      },
+      { value: "remove", label: "Remove provider", hint: "Delete from registry and Keychain when safe" },
+      { value: "back", label: "Back", hint: "" }
+    ]
+  });
+  if (p7.isCancel(action) || action === "back") return "back";
+  if (action === "toggle") {
+    const result = toggleProviderEnabled(id);
+    if (result.toggled) {
+      p7.log.success(`${provider.name} ${result.enabled ? "enabled" : "disabled"}.`);
+    }
+    return "back";
+  }
+  const code = await runProvidersRemove(id, true);
+  return code === 0 ? "removed" : "back";
+}
+async function runProvidersHub() {
+  const hasOpencode = findOpencodeBinary() !== null;
+  while (true) {
+    const entries = await resolveProvidersForDisplay();
+    const options = [];
+    for (const entry of entries) {
+      const hint = entry.cloudBuiltin ? "Active via OpenCode API key" : entry.id;
+      const value = entry.cloudBuiltin ? `cloud:${entry.id}` : `provider:${entry.id}`;
+      options.push({
+        value,
+        label: providerLabel(entry.name, entry.modelCount, entry.enabled),
+        hint
+      });
+    }
+    options.push({ value: "add", label: "+ Add a provider", hint: "" });
+    if (hasOpencode) {
+      options.push({ value: "import", label: "\u2192 Bring settings from OpenCode", hint: "One-time import" });
+    }
+    options.push({ value: "done", label: "Done", hint: "" });
+    const choice = await p7.select({
+      message: entries.length > 0 ? "Your AI providers" : "Get started",
+      options
+    });
+    if (p7.isCancel(choice) || choice === "done") {
+      return 0;
+    }
+    if (choice === "add") {
+      await runProvidersAdd();
+      continue;
+    }
+    if (choice === "import") {
+      await runProvidersImport();
+      continue;
+    }
+    if (typeof choice === "string" && choice.startsWith("cloud:")) {
+      const id = choice.slice("cloud:".length);
+      if (id === "zen" || id === "go") await runCloudBuiltinDetail(id);
+      continue;
+    }
+    if (typeof choice === "string" && choice.startsWith("provider:")) {
+      const id = choice.slice("provider:".length);
+      const outcome = await runProviderDetail(id);
+      if (outcome === "removed") continue;
+    }
+  }
 }
 async function runProvidersCommand(args) {
   const parsed = parseProvidersArgs(args);
@@ -3783,22 +4581,10 @@ async function runProvidersCommand(args) {
   }
   if (parsed.subcommand === "import") return runProvidersImport();
   if (parsed.subcommand === "list") return runProvidersList();
+  if (parsed.subcommand === "add") return runProvidersAdd();
+  if (parsed.subcommand === "remove" && parsed.removeId) return runProvidersRemove(parsed.removeId);
   p7.intro(pc5.bold("  Your AI providers"));
-  const choice = await p7.select({
-    message: "What would you like to do?",
-    options: [
-      { value: "list", label: "List configured providers" },
-      { value: "import", label: "Bring settings from OpenCode" },
-      { value: "done", label: "Done" }
-    ]
-  });
-  if (p7.isCancel(choice)) {
-    p7.cancel("Cancelled.");
-    return 0;
-  }
-  if (choice === "list") return runProvidersList();
-  if (choice === "import") return runProvidersImport();
-  return 0;
+  return runProvidersHub();
 }
 
 // src/cli.ts
@@ -4002,9 +4788,9 @@ ${pc6.bold("Examples:")}
   relay-ai models
   relay-ai claude    # switch menu active when favorites are set`;
 }
-function printHelp(text3) {
+function printHelp(text4) {
   console.log(`
-${text3}
+${text4}
 `);
 }
 async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindow, trace, claudeArgs) {

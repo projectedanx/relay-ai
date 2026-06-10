@@ -1,6 +1,8 @@
 import { BACKENDS } from './constants.js';
 import { getCachedModels, setCachedModels } from './config.js';
+import { readGlobalOpencodeCredential } from './env.js';
 import { getModels } from './models.js';
+import { loadRegistry } from './registry/io.js';
 import { loadRegistryProviders } from './registry/load.js';
 import { fetchLocalProviders } from './providers.js';
 import type { LocalProvider, ModelInfo } from './types.js';
@@ -82,6 +84,104 @@ export function providersForPicker(catalog: ProviderCatalog): LocalProvider[] {
     ...(catalog.goModels.length > 0 ? [zenGoAsLocalProvider('go', catalog.goModels)] : []),
     ...catalog.localProviders,
   ];
+}
+
+/** Row for providers list / hub — merges registry entries with live Zen/Go cloud builtins. */
+export interface ProviderDisplayEntry {
+  id: string;
+  name: string;
+  modelCount: number;
+  enabled: boolean;
+  authLabel: string;
+  inRegistry: boolean;
+  /** Zen/Go active via OpenCode API key but not saved in providers.json */
+  cloudBuiltin?: 'zen' | 'go';
+}
+
+function countUsableZenGoModels(models: ModelInfo[]): number {
+  return models.filter(m => m.modelFormat !== 'unsupported').length;
+}
+
+/**
+ * What relay-ai can actually use — registry providers plus Zen/Go when an OpenCode API key exists.
+ * Matches what `relay-ai models` shows in its provider picker.
+ */
+export async function resolveProvidersForDisplay(): Promise<ProviderDisplayEntry[]> {
+  const reg = loadRegistry();
+  const registryIds = new Set(reg.providers.map(p => p.id));
+  const entries: ProviderDisplayEntry[] = [];
+
+  const opencodeKey = await readGlobalOpencodeCredential();
+  let zenCount = 0;
+  let goCount = 0;
+
+  if (opencodeKey) {
+    const zenGo = await fetchZenGoModels(['zen', 'go']);
+    zenCount = countUsableZenGoModels(zenGo.zenModels);
+    goCount = countUsableZenGoModels(zenGo.goModels);
+
+    if (!registryIds.has('zen') && zenCount > 0) {
+      entries.push({
+        id: 'zen',
+        name: 'OpenCode Zen',
+        modelCount: zenCount,
+        enabled: true,
+        authLabel: 'keychain (OpenCode API key)',
+        inRegistry: false,
+        cloudBuiltin: 'zen',
+      });
+    }
+    if (!registryIds.has('go') && goCount > 0) {
+      entries.push({
+        id: 'go',
+        name: 'OpenCode Go',
+        modelCount: goCount,
+        enabled: true,
+        authLabel: 'keychain (OpenCode API key)',
+        inRegistry: false,
+        cloudBuiltin: 'go',
+      });
+    }
+  }
+
+  for (const provider of reg.providers) {
+    let modelCount = provider.modelsCache?.models.length ?? 0;
+    if (provider.id === 'zen' && zenCount > 0) modelCount = zenCount;
+    if (provider.id === 'go' && goCount > 0) modelCount = goCount;
+
+    entries.push({
+      id: provider.id,
+      name: provider.name,
+      modelCount,
+      enabled: provider.enabled,
+      authLabel: provider.authRef.startsWith('keyring:global:opencode')
+        ? 'keychain (OpenCode API key)'
+        : provider.authRef.startsWith('keyring:')
+          ? 'keychain'
+          : provider.authRef,
+      inRegistry: true,
+    });
+  }
+
+  return entries;
+}
+
+/** True when Zen/Go are already usable (registry entry or live OpenCode API key). */
+export async function resolveZenGoAvailability(): Promise<{ zen: boolean; go: boolean }> {
+  const reg = loadRegistry();
+  const key = await readGlobalOpencodeCredential();
+  if (!key) {
+    return {
+      zen: reg.providers.some(p => p.id === 'zen'),
+      go: reg.providers.some(p => p.id === 'go'),
+    };
+  }
+
+  const zenGo = await fetchZenGoModels(['zen', 'go']);
+  return {
+    zen: reg.providers.some(p => p.id === 'zen') || countUsableZenGoModels(zenGo.zenModels) > 0,
+    go: reg.providers.some(p => p.id === 'go') || countUsableZenGoModels(zenGo.goModels) > 0,
+  };
 }
 
 export function localProvidersToServerModels(localProviders: LocalProvider[]): ServerModelInfo[] {

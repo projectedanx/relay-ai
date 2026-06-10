@@ -249,6 +249,16 @@ export async function saveProviderCredential(
   return writeKeyringAccount(parsed.account, key, diag);
 }
 
+/** Delete a provider secret from keyring (no-op for env: refs). */
+export async function deleteProviderCredential(
+  authRef: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  const parsed = parseAuthRef(authRef);
+  if (!parsed || parsed.kind !== 'keyring') return false;
+  return deleteKeyringAccount(parsed.account, diag);
+}
+
 export async function readFromCredentialStore(diag?: (msg: string) => void): Promise<string | null> {
   return readGlobalOpencodeCredential(diag);
 }
