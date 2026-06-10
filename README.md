@@ -323,6 +323,10 @@ export RELAY_AI_HOME="/path/to/your/relay-ai-home"
 
 The OpenCode API key is stored separately, based on what you chose during setup (Keychain, credential store, or shell profile).
 
+## Troubleshooting
+
+See **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** for common issues — especially **“Not logged in”** after accidentally choosing **No** on Claude Code’s custom API key prompt.
+
 ## Upgrading from opencode-starter
 
 If you used the old **opencode-starter** CLI, relay-ai migrates automatically on first run:
