@@ -24,6 +24,7 @@ import {
 } from './registry/crud.js';
 import { loadRegistry } from './registry/io.js';
 import { refreshAllProviderModels, refreshProviderModels } from './registry/refresh-models.js';
+import { resolveRefreshCredential } from './registry/refresh-credentials.js';
 import { resolveOrCollectApiKey } from './key-setup.js';
 import { setSubscriptionTier } from './config.js';
 
@@ -155,7 +156,7 @@ export async function runProvidersImport(): Promise<number> {
 }
 
 export async function runProvidersRefreshModels(providerId?: string): Promise<number> {
-  const resolveKey = async (provider: { id: string; authRef: string }) =>
+  const resolveKey = async (provider: import('./registry/types.js').RegistryProvider) =>
     resolveProviderCredential(provider.id, provider.authRef);
 
   if (providerId) {
@@ -167,11 +168,14 @@ export async function runProvidersRefreshModels(providerId?: string): Promise<nu
     }
     const spinner = p.spinner();
     spinner.start(`Refreshing ${provider.name}...`);
-    const key = await resolveKey(provider);
+    const key = await resolveRefreshCredential(provider, async p =>
+      resolveProviderCredential(p.id, p.authRef),
+    );
     const result = await refreshProviderModels(providerId, key);
     spinner.stop('');
     if (result.skipped) {
-      p.log.warn(`${result.name}: ${result.reason}`);
+      const countNote = result.modelCount ? ` (${result.modelCount} cached models kept)` : '';
+      p.log.warn(`${result.name}: ${result.reason}${countNote}`);
       return 0;
     }
     if (!result.ok) {
@@ -198,7 +202,8 @@ export async function runProvidersRefreshModels(providerId?: string): Promise<nu
     }
   }
   for (const r of skipped) {
-    p.log.warn(`Skipped ${r.name}: ${r.reason}`);
+    const countNote = r.modelCount ? ` (${r.modelCount} cached models kept)` : '';
+    p.log.warn(`Skipped ${r.name}: ${r.reason}${countNote}`);
   }
   for (const r of failed) {
     p.log.error(`${r.name}: ${r.reason ?? 'Refresh failed.'}`);

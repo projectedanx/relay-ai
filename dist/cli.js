@@ -4776,6 +4776,50 @@ function resolveModelSource(provider) {
   return "api-list";
 }
 
+// src/registry/refresh-credentials.ts
+var PLACEHOLDER_KEYS = /* @__PURE__ */ new Set([
+  "anything",
+  "local",
+  "ollama",
+  "none",
+  "n/a",
+  "na",
+  "placeholder",
+  "test",
+  "no-key"
+]);
+var ENV_FALLBACK_BY_PROVIDER = {
+  anthropic: ["ANTHROPIC_API_KEY"],
+  openai: ["OPENAI_API_KEY"]
+};
+function isPlaceholderProviderKey(key) {
+  if (!key?.trim()) return true;
+  return PLACEHOLDER_KEYS.has(key.trim().toLowerCase());
+}
+function cachedModelCount(provider) {
+  return provider.modelsCache?.models.length ?? 0;
+}
+function skipWithCachedModels(provider, reason) {
+  const count = cachedModelCount(provider);
+  return {
+    id: provider.id,
+    name: provider.name,
+    ok: true,
+    skipped: true,
+    modelCount: count > 0 ? count : void 0,
+    reason
+  };
+}
+async function resolveRefreshCredential(provider, resolveKey) {
+  let key = await resolveKey(provider);
+  if (!isPlaceholderProviderKey(key)) return key;
+  for (const envVar of ENV_FALLBACK_BY_PROVIDER[provider.id] ?? []) {
+    const fromEnv = process.env[envVar]?.trim();
+    if (fromEnv && !isPlaceholderProviderKey(fromEnv)) return fromEnv;
+  }
+  return key;
+}
+
 // src/registry/refresh-models.ts
 function modelInfoToCached(m, npm, apiUrl) {
   return {
@@ -4864,6 +4908,20 @@ async function refreshProviderModels(providerId, apiKey, registry = loadRegistry
     if (source === "zen-go-api") {
       models = await refreshZenGoProvider(provider);
     } else {
+      if (isPlaceholderProviderKey(apiKey)) {
+        if (cachedModelCount(provider) > 0) {
+          return skipWithCachedModels(
+            provider,
+            "OpenCode imported a placeholder API key \u2014 kept cached model list. Add this provider again via relay-ai providers add with a real key to refresh live."
+          );
+        }
+        return {
+          id: provider.id,
+          name: provider.name,
+          ok: false,
+          reason: "No usable API key \u2014 add the provider via relay-ai providers add with a real key."
+        };
+      }
       if (!apiKey) {
         return {
           id: provider.id,
@@ -4874,6 +4932,12 @@ async function refreshProviderModels(providerId, apiKey, registry = loadRegistry
       }
       const fetched = await refreshApiListProvider(provider, apiKey);
       if (fetched.error) {
+        if ((fetched.error.includes("rejected") || fetched.error.includes("401") || fetched.error.includes("403")) && cachedModelCount(provider) > 0) {
+          return skipWithCachedModels(
+            provider,
+            `${fetched.error} Kept ${cachedModelCount(provider)} cached model${cachedModelCount(provider) === 1 ? "" : "s"} from import. Update your API key via relay-ai providers add if you need a live refresh.`
+          );
+        }
         return { id: provider.id, name: provider.name, ok: false, reason: fetched.error };
       }
       models = fetched.models;
@@ -4907,7 +4971,7 @@ async function refreshAllProviderModels(resolveKey) {
     const registry = loadRegistry();
     const provider = registry.providers.find((p9) => p9.id === id);
     if (!provider) continue;
-    const key = await resolveKey(provider);
+    const key = await resolveRefreshCredential(provider, resolveKey);
     refreshed.push(await refreshProviderModels(id, key, registry));
   }
   return { refreshed };
@@ -5028,11 +5092,15 @@ async function runProvidersRefreshModels(providerId) {
     }
     const spinner6 = p7.spinner();
     spinner6.start(`Refreshing ${provider.name}...`);
-    const key = await resolveKey(provider);
+    const key = await resolveRefreshCredential(
+      provider,
+      async (p9) => resolveProviderCredential(p9.id, p9.authRef)
+    );
     const result = await refreshProviderModels(providerId, key);
     spinner6.stop("");
     if (result.skipped) {
-      p7.log.warn(`${result.name}: ${result.reason}`);
+      const countNote = result.modelCount ? ` (${result.modelCount} cached models kept)` : "";
+      p7.log.warn(`${result.name}: ${result.reason}${countNote}`);
       return 0;
     }
     if (!result.ok) {
@@ -5056,7 +5124,8 @@ async function runProvidersRefreshModels(providerId) {
     }
   }
   for (const r of skipped) {
-    p7.log.warn(`Skipped ${r.name}: ${r.reason}`);
+    const countNote = r.modelCount ? ` (${r.modelCount} cached models kept)` : "";
+    p7.log.warn(`Skipped ${r.name}: ${r.reason}${countNote}`);
   }
   for (const r of failed) {
     p7.log.error(`${r.name}: ${r.reason ?? "Refresh failed."}`);

@@ -18,6 +18,12 @@ import {
   loadPricingCache,
   pricingPlatformForProvider,
 } from './pricing.js';
+import {
+  cachedModelCount,
+  isPlaceholderProviderKey,
+  resolveRefreshCredential,
+  skipWithCachedModels,
+} from './refresh-credentials.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 
 export interface RefreshProviderResult {
@@ -160,6 +166,21 @@ export async function refreshProviderModels(
     if (source === 'zen-go-api') {
       models = await refreshZenGoProvider(provider);
     } else {
+      if (isPlaceholderProviderKey(apiKey)) {
+        if (cachedModelCount(provider) > 0) {
+          return skipWithCachedModels(
+            provider,
+            'OpenCode imported a placeholder API key — kept cached model list. '
+            + 'Add this provider again via relay-ai providers add with a real key to refresh live.',
+          );
+        }
+        return {
+          id: provider.id,
+          name: provider.name,
+          ok: false,
+          reason: 'No usable API key — add the provider via relay-ai providers add with a real key.',
+        };
+      }
       if (!apiKey) {
         return {
           id: provider.id,
@@ -170,6 +191,16 @@ export async function refreshProviderModels(
       }
       const fetched = await refreshApiListProvider(provider, apiKey);
       if (fetched.error) {
+        if (
+          (fetched.error.includes('rejected') || fetched.error.includes('401') || fetched.error.includes('403'))
+          && cachedModelCount(provider) > 0
+        ) {
+          return skipWithCachedModels(
+            provider,
+            `${fetched.error} Kept ${cachedModelCount(provider)} cached model${cachedModelCount(provider) === 1 ? '' : 's'} from import. `
+            + 'Update your API key via relay-ai providers add if you need a live refresh.',
+          );
+        }
         return { id: provider.id, name: provider.name, ok: false, reason: fetched.error };
       }
       models = fetched.models;
@@ -210,7 +241,7 @@ export async function refreshAllProviderModels(
     const registry = loadRegistry();
     const provider = registry.providers.find(p => p.id === id);
     if (!provider) continue;
-    const key = await resolveKey(provider);
+    const key = await resolveRefreshCredential(provider, resolveKey);
     refreshed.push(await refreshProviderModels(id, key, registry));
   }
 
