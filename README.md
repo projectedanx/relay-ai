@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://youtu.be/IvsUPHLhX0o">
-    <img src="https://img.youtube.com/vi/IvsUPHLhX0o/maxresdefault.jpg" alt="relay-ai demo — installation, configuration, Claude Code, Claude Cowork & Claude Code Desktop (Part 1)" width="100%">
+    <img src="assets/demo-part1-thumbnail.png" alt="relay-ai demo — installation, configuration, Claude Code, Claude Cowork & Claude Code Desktop (Part 1)" width="100%">
   </a>
 </p>
 
