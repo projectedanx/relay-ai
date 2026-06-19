@@ -353,7 +353,7 @@ Launch the **Codex app** (macOS or Windows) with registry providers:
 relay-ai codex-app
 ```
 
-Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal restores your config. Tier 2 (Anthropic, etc.) requires keeping that terminal open. Preview config without writing: `relay-ai codex-app --config`. Recovery: `relay-ai codex-app --restore`.
+Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal restores your config. The app keeps Codex's built-in `openai` provider active so existing conversation history remains visible, and routes the selected model through a foreground local proxy. Preview config without writing: `relay-ai codex-app --config`. Recovery: `relay-ai codex-app --restore`.
 
 See **[docs/CODEX.md](docs/CODEX.md)** for CLI vs app differences, file ownership, and troubleshooting.
 

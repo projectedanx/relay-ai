@@ -325,7 +325,7 @@ describe('buildCatalogFile', () => {
     const sonnet = { id: 'claude-sonnet-4-6', name: 'claude-sonnet-4-6', family: 'claude', brand: 'Claude', modelFormat: 'anthropic' as const, upstreamModelId: 'claude-sonnet-4-6', contextWindow: 200000 };
     expect(formatCodexModelLabel(haiku)).toBe('Claude Haiku 4.5');
     const catalog = buildAppCatalogFile([sonnet, haiku], 'Anthropic', haiku.id);
-    expect(catalog.models[0]!.slug).toBe('relay-ai-launch-codex-app/claude-haiku-4-5-20251001');
+    expect(catalog.models[0]!.slug).toBe('claude-haiku-4-5-20251001');
     expect(catalog.models[0]!.display_name).toBe('Claude Haiku 4.5');
     expect(catalog.models[0]!.priority).toBe(0);
     expect(catalog.models[1]!.priority).toBe(1);

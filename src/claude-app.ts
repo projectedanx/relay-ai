@@ -16,7 +16,7 @@ import { createGatewayModelCatalog, type ServerModelInfo } from './server/models
 import { BACKENDS } from './constants.js';
 import { loadServerModels } from './server/index.js';
 import { filterServerModelsByFavorites } from './server/catalog-filter.js';
-import { writeRelayAiConfig, injectCoworkEgressHosts, getClaudeDesktopHome } from './claude-desktop/app-config.js';
+import { writeRelayAiConfig, getClaudeDesktopHome } from './claude-desktop/app-config.js';
 import { getProxyDebugLogPath } from './trace-log.js';
 import { readSessionLock, recoverSession, hasStaleSession, writeSessionLock, setupExitCleanup, cleanupSession, backupMetaJson, isConcurrentLiveSession, waitForShutdown } from './claude-desktop/app-session.js';
 import { launchOrRestartClaudeApp, claudeAppSupported, isClaudeAppRunning, quitClaudeAppGracefully } from './claude-desktop/app-launch.js';
@@ -177,8 +177,6 @@ export async function runClaudeAppCommand(args: string[]): Promise<number> {
 
   try {
     backupMetaJson();
-    // Inject egress hosts in main config
-    injectCoworkEgressHosts();
 
     proxyHandle = await startServer({
       host: '127.0.0.1',
